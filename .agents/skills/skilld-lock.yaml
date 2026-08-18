@@ -30,6 +30,7 @@ skills:
   anthropic-ai-claude-code-skilld:
     packageName: "@anthropic-ai/claude-code"
     version: 2.1.235
+    packages: "@anthropic-ai/claude-code@2.1.235"
     repo: Exhen/claude-code-2.1.88
     source: "ungh://Exhen/claude-code-2.1.88"
     syncedAt: 2026-08-18

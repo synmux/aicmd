@@ -26,5 +26,8 @@
     "onnxruntime-node",
     "protobufjs",
     "sharp"
-  ]
+  ],
+  "scripts": {
+    "prepare": "skilld prepare || true"
+  }
 }
