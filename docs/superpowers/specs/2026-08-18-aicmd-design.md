@@ -25,8 +25,8 @@ Published as `@synmux/aicmd` with binaries `aicmd` and `ai`.
 
 ## Architecture
 
-Same shape as `claude-commit` (the pattern source living in `./claude-commit`,
-read-only):
+Same shape as [claude-commit](https://github.com/synmux/claude-commit), the
+external pattern source:
 
 ```text
 bin/aicmd.js           # runtime launcher: bun ▸ bun on PATH ▸ dist under node ▸ node TS stripping
@@ -236,7 +236,7 @@ overloaded, model-not-found, max-output) exactly as in claude-commit.
 
 ## Testing
 
-`bun test test` (scoped so claude-commit's own suite is not swept up):
+`bun test`:
 
 - `safety.test.ts` — glob→regex conversion, default pattern hits/misses,
   `re:` patterns, replace-vs-extend config semantics, model-flag OR.

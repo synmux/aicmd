@@ -31,5 +31,5 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "exclude": ["node_modules", "dist", "claude-commit"]
+  "exclude": ["node_modules", "dist"]
 }

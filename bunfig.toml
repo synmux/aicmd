@@ -1,4 +1,0 @@
-# Scope `bun test` to this package's suite; the vendored ./claude-commit
-# reference tree carries its own tests which must not run here.
-[test]
-root = "test"

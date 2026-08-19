@@ -207,7 +207,6 @@ bun run typecheck  # tsc --noEmit
 bun run build      # bundle dist/aicmd.js for plain-Node installs
 ```
 
-The repository vendors a read-only copy of
-[claude-commit](https://github.com/synmux/claude-commit) in `./claude-commit`
-as the architectural reference; see `WALKTHROUGH`-style docs there and the
-design spec in `docs/superpowers/specs/`.
+The architecture follows the patterns of
+[claude-commit](https://github.com/synmux/claude-commit); see the design spec
+in `docs/superpowers/specs/`.

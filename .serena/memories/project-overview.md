@@ -7,15 +7,14 @@ assessment, asks [y/N/e], and runs it. Replaces the user's fish `ai` function.
 ## Key facts
 
 - Design spec + decision log: `docs/superpowers/specs/2026-08-18-aicmd-design.md`
-- `./claude-commit` is a READ-ONLY vendored reference implementation whose
-  patterns this repo follows (agent isolation, config layering, OpenTUI
-  picker, ora spinner, error boundaries). Never modify it.
+- Architecture patterns (agent isolation, config layering, OpenTUI picker,
+  ora spinner, error boundaries) follow the external claude-commit project
+  (github.com/synmux/claude-commit); its once-vendored copy has been removed.
 - Runtime: bun-first, plain-Node fallback. `bin/aicmd.js` launcher picks:
   bun → respawn bun; else dist/aicmd.js bundle; else Node ≥22.18 native type
   stripping. Consequences: src/ uses node:\* APIs (NOT Bun.file/Bun.$ — a
   documented exception to the house rule), erasable-only TS, explicit `.ts`
   import extensions, no JSON imports.
-- `bunfig.toml` scopes `bun test` to ./test (else claude-commit's suite runs).
 - Safety invariants (load-bearing): -x refuses dangerous commands without -f;
   confirm default is No; picking a dangerous candidate in the TUI requires a
   second confirmation; ONLY the command goes to stdout, all chrome to stderr.
