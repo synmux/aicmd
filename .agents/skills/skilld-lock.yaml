@@ -69,3 +69,10 @@ skills:
     source: readme
     syncedAt: 2026-08-18
     generator: skilld
+  biomejs-biome-skilld:
+    packageName: "@biomejs/biome"
+    version: 2.5.9
+    repo: biomejs/biome
+    source: "https://github.com/biomejs/biome/tree/@biomejs/biome@2.5.9/docs"
+    syncedAt: 2026-08-19
+    generator: skilld

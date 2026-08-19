@@ -1,7 +1,7 @@
 {
   "name": "@synmux/aicmd",
   "version": "0.1.0",
-  "description": "Generate shell commands from natural language with Claude — show, confirm, and run them safely. Uses your Claude Code subscription.",
+  "description": "Generate shell commands from natural language with Claude. Uses your Claude Code subscription.",
   "type": "module",
   "private": false,
   "bin": {

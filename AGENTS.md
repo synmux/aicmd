@@ -66,3 +66,9 @@ Default to Bun instead of Node.js for tooling:
 The Bun-native API preferences (Bun.serve, bun:sqlite, Bun.file, Bun.$, …)
 apply to Bun-only projects; **this package's `src/` is the documented
 exception** (see Rules above).
+
+<!-- skilld -->
+
+Before modifying code, evaluate each installed skill against the current task.
+For each skill, determine YES/NO relevance and invoke all YES skills before proceeding.
+<!-- /skilld -->
