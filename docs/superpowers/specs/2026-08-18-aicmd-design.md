@@ -179,7 +179,7 @@ text (re-checked against the danger patterns). Default is **No** (running a
 shell command is riskier than committing).
 
 Interactive mode: OpenTUI `SelectRenderable` listing candidates
-(command as the name — prefixed `⚠ ` when dangerous — explanation as the
+(command as the name — prefixed `⚠` when dangerous — explanation as the
 description), ↑/↓/j/k navigate, ⏎ run, `e` edit-then-run, `q`/Esc cancel.
 Content-sized height with terminal cap + internal scrolling (claude-commit's
 `pickerHeight` approach), headless-renderer tests, readline fallback when the

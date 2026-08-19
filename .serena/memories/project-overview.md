@@ -12,7 +12,7 @@ assessment, asks [y/N/e], and runs it. Replaces the user's fish `ai` function.
   picker, ora spinner, error boundaries). Never modify it.
 - Runtime: bun-first, plain-Node fallback. `bin/aicmd.js` launcher picks:
   bun → respawn bun; else dist/aicmd.js bundle; else Node ≥22.18 native type
-  stripping. Consequences: src/ uses node:* APIs (NOT Bun.file/Bun.$ — a
+  stripping. Consequences: src/ uses node:\* APIs (NOT Bun.file/Bun.$ — a
   documented exception to the house rule), erasable-only TS, explicit `.ts`
   import extensions, no JSON imports.
 - `bunfig.toml` scopes `bun test` to ./test (else claude-commit's suite runs).
@@ -27,8 +27,8 @@ assessment, asks [y/N/e], and runs it. Replaces the user's fish `ai` function.
   package.json `aicmd` key (walk-up) < nearest .aicmd.json/.aicmdrc(.json)
   (walk-up) < flags.
 - Agent SDK isolation (src/agent.ts): tools/skills/plugins [], mcpServers {}
-  + strictMcpConfig, settingSources [], maxTurns 1; ANTHROPIC_API_KEY/
-  AUTH_TOKEN stripped unless allowApiKey.
+  - strictMcpConfig, settingSources [], maxTurns 1; ANTHROPIC_API_KEY/
+    AUTH_TOKEN stripped unless allowApiKey.
 - Tests: `bun test` (TDD — tests written first), `bun run typecheck`,
   `bun run build` (dist bundle for plain-node installs).
 
