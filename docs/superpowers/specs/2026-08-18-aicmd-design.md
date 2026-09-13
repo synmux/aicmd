@@ -29,9 +29,9 @@ Same shape as [claude-commit](https://github.com/synmux/claude-commit), the
 external pattern source:
 
 ```text
-bin/aicmd.js           # runtime launcher: bun ▸ bun on PATH ▸ dist under node ▸ node TS stripping
-bin/aicmd.ts           # bun/node-ts entry, thin: calls run(argv)
-index.ts               # library barrel (Bun-only package entry via the exports map)
+bin/aicmd.js           # runtime launcher (plain JS): dist under node ▸ node TS stripping
+bin/aicmd.ts           # TypeScript entry, thin: calls run(argv)
+index.ts               # library barrel (source-only; the package is a CLI first)
 src/cli.ts             # Commander program + orchestration + mode resolution
 src/generate.ts        # generation pipeline (structured-first, fallbacks)
 src/agent.ts           # Claude Agent SDK wrapper (isolated single-turn call)
@@ -43,40 +43,41 @@ src/context.ts         # platform/shell context block for the prompt
 src/errors.ts          # AicmdError (expected, user-facing failures)
 src/types.ts           # shared interfaces
 src/utils.ts           # version lookup
-src/ui/colors.ts       # ANSI helpers (stderr-gated, NO_COLOR-aware)
-src/ui/spinner.ts      # ora + cli-spinners progress spinner (stderr only)
-src/ui/prompt.ts       # ask for a task when argv is empty; y/N/e confirm; $EDITOR
-src/ui/interactive.ts  # OpenTUI picker for -i multi-candidate mode
-test/*.test.ts         # bun test suites for all deterministic logic
+src/ui/colors.ts       # minimal ANSI helper for the few non-Clack stderr lines
+src/ui/chrome.ts       # Clack chrome on stderr (command block, warnings, notes, cancel/outro)
+src/ui/spinner.ts      # hand-rolled spinner: cli-spinners frames, Clack glyphs (stderr only)
+src/ui/prompt.ts       # Clack text prompt for the task; y/N/e confirm (SelectKeyPrompt); $EDITOR
+src/ui/interactive.ts  # Clack SelectPrompt picker for -i multi-candidate mode
+test/*.test.ts         # vitest suites for all deterministic logic
+test/terminal.ts       # fake terminal driving real prompts through PassThrough/Writable
 ```
 
-## Runtime Strategy (bun-first, node fallback)
+## Runtime Strategy (plain Node, TypeScript sources)
+
+Revised 2026-09-13: Bun was removed from the repository. Node 24 (pinned by
+mise) is the only runtime, pnpm the package manager, vitest the test runner
+and esbuild the bundler.
 
 - `bin/aicmd.js` is plain JavaScript with `#!/usr/bin/env node`, resolving in
-  four steps:
-  1. Already under Bun (`process.versions.bun`, e.g. `bunx`): import the
-     TypeScript entry directly.
-  2. Bun on `PATH` (probe must **exit 0** — version-manager shims that exist
-     but fail count as "no bun"): re-spawn `bun bin/aicmd.ts` with stdio
-     inherited, the exit code propagated, fatal signals re-raised, and SIGINT
-     ignored in the launcher while the child runs so Ctrl-C cannot orphan it.
-  3. `dist/aicmd.js` present (every published install; `prepack` builds it):
-     import the bundled build under Node. This step is what makes plain-Node
-     installs work at all — Node refuses to type-strip files inside
-     `node_modules` — and sets the supported floor at Node ≥ 22.12
-     (commander 15's requirement; dependencies stay external to the bundle).
-  4. Development checkout without a build: import the TypeScript entry under
-     Node's native type stripping (Node ≥ 22.18), with an actionable
-     three-option error message when that fails.
+  two steps:
+  1. `dist/aicmd.js` present (every published install; `prepack` builds it
+     with `esbuild --bundle --platform=node --format=esm --packages=external`):
+     import the bundled build. This step is what makes installs work at
+     all — Node refuses to type-strip files inside `node_modules` — and sets
+     the supported floor at Node ≥ 22.12 (commander 15's requirement).
+  2. Development checkout without a build: import the TypeScript entry under
+     Node's native type stripping (Node ≥ 22.18), with an actionable error
+     message when that fails.
 - All TypeScript is erasable-syntax-only (enforced by `erasableSyntaxOnly` in
-  tsconfig), relative imports carry explicit `.ts` extensions, and no
-  Bun-only APIs are used (`node:fs`, `node:child_process` instead of
-  `Bun.file`/`Bun.$`) so the same sources run on both runtimes. This
-  intentionally overrides the repo's Bun-API preference: the node fallback is
-  an explicit product requirement.
-- The package `exports` map exposes the library barrel (`index.ts`) under the
-  `bun` condition only; there is no built library entry for Node, and the
-  published package is a CLI first.
+  tsconfig), relative imports carry explicit `.ts` extensions, JSON is read
+  with `fs` rather than imported, and only `node:*` APIs are used. Sources
+  are never compiled for development or tests; the bundle is a packaging
+  artefact only.
+- The package `exports` map exposes only `./package.json`; `index.ts` is a
+  source-only barrel and the published package is a CLI first.
+- pnpm's `minimumReleaseAge` (one week) means `pnpm add` resolves to the
+  newest version at least a week old; `allowBuilds` in pnpm-workspace.yaml
+  replaces Bun's `trustedDependencies` (esbuild is approved there).
 
 ## Generation Pipeline
 
@@ -170,21 +171,37 @@ aicmd [options] [task...]
   -V, --version / -h, --help
 ```
 
-Task input: argv words joined; empty argv + TTY → readline ask; empty argv +
-piped stdin → read the task from stdin.
+Task input: argv words joined; empty argv + TTY → Clack text prompt on
+stderr; empty argv + piped stdin → read the task from stdin.
 
-Confirm prompt: `Run this command? [y/N/e]` — `e` opens `$EDITOR`
+Confirm prompt: a Clack `SelectKeyPrompt` (`Run this command?` with
+`y Yes · n No · e Edit`) answered by one keypress. `e` opens `$EDITOR`
 (GIT_EDITOR ▸ VISUAL ▸ EDITOR ▸ vi) on the command before running the edited
 text (re-checked against the danger patterns). Default is **No** (running a
-shell command is riskier than committing).
+shell command is riskier than committing): Enter, Escape, Ctrl-C and EOF all
+resolve to No.
 
-Interactive mode: OpenTUI `SelectRenderable` listing candidates
-(command as the name — prefixed `⚠` when dangerous — explanation as the
-description), ↑/↓/j/k navigate, ⏎ run, `e` edit-then-run, `q`/Esc cancel.
-Content-sized height with terminal cap + internal scrolling (claude-commit's
-`pickerHeight` approach), headless-renderer tests, readline fallback when the
-TUI cannot initialize. Explicit `-i` without a TTY is a hard error;
-config-driven interactive without a TTY quietly falls back.
+Interactive mode: a Clack `SelectPrompt` with a custom frame
+(`renderPickerFrame`, pure) listing every candidate as two rows — the
+command (prefixed `⚠` when dangerous) and its explanation or danger reason —
+so options can be compared without moving the cursor. ↑/↓/j/k navigate,
+⏎ run, `e` edit-then-run, `q`/Esc/Ctrl-C cancel. Overflow scrolls through
+Clack's `limitOptions`, keeping the cursor in view. Explicit `-i` without a
+TTY is a hard error; config-driven interactive without a TTY quietly falls
+back to printing. (The OpenTUI picker and its readline fallback were replaced
+on 2026-09-13; see the decisions log.)
+
+Chrome (`src/ui/chrome.ts`): Clack's guide-bar look — `intro` on a TTY, the
+command in a titled `note` box, `log.warn` for danger warnings, dim
+`log.message` lines for explanations and notes, `log.error` for refusals,
+`cancel` / `outro` to close. The guide bar is drawn only when stderr is a
+terminal; piped stderr gets the same text as plain lines. Every helper takes
+its output stream and defaults to stderr.
+
+Spinner (`src/ui/spinner.ts`): hand-rolled on cli-spinners frames and Clack
+glyphs. While spinning on a TTY it discards typed input (so keystrokes cannot
+pre-answer the confirmation) and re-raises Ctrl-C as SIGINT so the two-stage
+cancel in `src/cli.ts` keeps working.
 
 ## Execution
 
@@ -236,7 +253,7 @@ overloaded, model-not-found, max-output) exactly as in claude-commit.
 
 ## Testing
 
-`bun test`:
+`pnpm test` (vitest):
 
 - `safety.test.ts` — glob→regex conversion, default pattern hits/misses,
   `re:` patterns, replace-vs-extend config semantics, model-flag OR.
@@ -254,14 +271,27 @@ overloaded, model-not-found, max-output) exactly as in claude-commit.
 - `exec.test.ts` — real `/bin/sh` runs: exit-code and signal mapping, and
   the SIGINT-takeover/restore contract while a child runs.
 - `prompt-ui.test.ts` — editor resolution order, `parseConfirmAnswer`
-  (default No).
-- `bin.test.ts` — entry points report the version under bun and node, and a
-  broken `bun` shim on PATH falls back cleanly.
-- `interactive.test.ts` — `pickerHeight`, `buildPickerScene` under the
-  OpenTUI headless test renderer (danger marker, scroll cap).
+  (default No), `renderConfirmFrame`, and `confirmRun` driven through fake
+  streams (Enter/Escape/Ctrl-C → No, y/n/e, unrelated keys ignored).
+- `bin.test.ts` — the TypeScript entry and the launcher report the version
+  under Node; `--help` documents the safety flags.
+- `interactive.test.ts` — `pickerEntryLabel`, `renderPickerFrame` (every
+  command and explanation, danger marker, scroll indicator on a small
+  terminal), and `selectCommand` driven through fake streams (arrows, j/k
+  with wrap, Enter, `e`, `q`/Escape/Ctrl-C).
+- `spinner.test.ts` — name resolution; the `Spinner` under fake timers
+  (silent when disabled, frames and label when enabled, update, stop,
+  restart, timer cleanup).
+- `chrome.test.ts` — every chrome helper writes its text to the given
+  stream and nothing to `process.stdout`/`process.stderr`.
+- `test/terminal.ts` — the fake terminal: PassThrough input, collecting
+  Writable output with `columns`/`rows`, `press()` with the timing readline
+  needs to settle a lone Escape.
 
-No tests for the live SDK path or the TUI event loop (isolated behind
-adapters, mirroring claude-commit's boundary choices).
+No tests for the live SDK path or `$EDITOR` (isolated behind adapters,
+mirroring claude-commit's boundary choices). Manual end-to-end runs through
+`expect` with a sized pty verified the confirm prompt, the picker and Ctrl-C
+during generation on 2026-09-13.
 
 ## Decisions Log
 
@@ -276,8 +306,24 @@ adapters, mirroring claude-commit's boundary choices).
   isolated single-turn completion with explicit platform context is safer,
   faster, cheaper, and deterministic. Structured output replaces defensive
   parsing.
-- **node:fs/node:child_process over Bun APIs** — required by the node
-  fallback; recorded in AGENTS.md as a deliberate exception to the Bun-API
-  house rule.
+- **node:fs/node:child_process over Bun APIs** — originally required by the
+  node fallback; since 2026-09-13 Node is the only runtime, so `node:*` is
+  simply the rule.
+- **Bun removed (2026-09-13)** — the repository moved to plain Node 24 with
+  pnpm, vitest and esbuild. The launcher no longer probes for Bun; sources
+  stay TypeScript and run under Node's native type stripping.
+- **OpenTUI → Clack (2026-09-13)** — `@opentui/core` requires Bun or
+  Node ≥ 26.4 with `--experimental-ffi`, and it backed exactly one screen.
+  `@clack/core` prompts with custom render functions replace the picker and
+  the readline confirm; `@clack/prompts` provides the chrome. The readline
+  picker fallback was dropped (Clack has no native engine that can fail to
+  initialise, and `-i` already requires a TTY).
+- **Hand-rolled spinner, not Clack's** — Clack's `spinner()` enters raw mode
+  and calls `process.exit(0)` on Ctrl-C, which would bypass the two-stage
+  SIGINT handling and report success on a cancelled run. Ours only draws
+  frames, discards typed input while spinning, and re-raises Ctrl-C as
+  SIGINT. ora was dropped with it; cli-spinners stays for the named frames.
+- **Guide bar only on a TTY** — Clack chrome passes `withGuide: isTTY(output)`
+  so piped stderr stays plain text.
 - **`ai` as a second bin name** — matches the fish function it replaces;
   users who fear collisions simply don't use it.

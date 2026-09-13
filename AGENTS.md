@@ -8,7 +8,7 @@ for the full design and decision log.
 ## Layout
 
 ```text
-bin/aicmd.js           # runtime launcher: bun ▸ dist under node ▸ node TS stripping
+bin/aicmd.js           # runtime launcher (plain JS): dist under node ▸ node TS stripping
 bin/aicmd.ts           # thin entry calling run()
 index.ts               # library re-exports
 src/cli.ts             # Commander program, run-mode resolution, flows
@@ -19,53 +19,58 @@ src/safety.ts          # guard patterns (globs + re:) + model-flag combination
 src/exec.ts            # shell -c execution, exit-code/signal mapping
 src/config.ts          # XDG global / package.json / rc-file discovery
 src/context.ts         # platform + shell context block
-src/ui/                # colors, ora spinner, prompts/$EDITOR, OpenTUI picker
-test/                  # bun test suites (TDD; tests are written first)
+src/ui/chrome.ts       # Clack chrome on stderr: command block, warnings, notes, cancel/outro
+src/ui/spinner.ts      # hand-rolled spinner (cli-spinners frames, Clack glyphs)
+src/ui/prompt.ts       # Clack text prompt for the task, y/N/e confirm, $EDITOR
+src/ui/interactive.ts  # Clack SelectPrompt picker for -i multi-candidate mode
+src/ui/colors.ts       # minimal ANSI helper for the few non-Clack stderr lines
+test/                  # vitest suites (TDD; tests are written first)
+test/terminal.ts       # fake terminal: drives real prompts through PassThrough/Writable
 ```
 
 ## Rules for this repository
 
-- **Runtime portability overrides the Bun-API house rule**: `src/` must run
-  under both Bun and plain Node, so use `node:fs`, `node:child_process`,
-  `node:os` etc. instead of `Bun.file`/`Bun.$`/`Bun.spawn`, keep TypeScript
-  erasable-syntax-only (no enums, namespaces, parameter properties), give
-  every relative import an explicit `.ts` extension, and never import JSON
-  (read it with `fs`). Bun remains the dev toolchain (`bun test`, `bun run`).
-- TDD: write the failing test first (`test/*.test.ts`), then implement. UI
-  layout is tested with OpenTUI's headless renderer (`@opentui/core/testing`);
-  thin I/O adapters (readline, $EDITOR spawn, live SDK calls) stay untested.
+- **Plain Node, TypeScript sources.** The runtime is Node 24 (mise), the
+  package manager is pnpm, and there is no Bun anywhere. Node runs the `.ts`
+  files natively (type stripping), so keep TypeScript erasable-syntax-only
+  (no enums, namespaces, parameter properties), give every relative import
+  an explicit `.ts` extension, never import JSON (read it with `fs`), and
+  use `node:*` APIs only. The esbuild bundle (`dist/aicmd.js`) exists solely
+  because Node refuses to type-strip inside `node_modules`; `prepack` builds
+  it and publishing without it breaks every install.
+- **The terminal layer is Clack.** Prompts come from `@clack/core`
+  (`SelectPrompt`, `SelectKeyPrompt`) with our own render functions; chrome
+  comes from `@clack/prompts` (`note`, `log`, `cancel`, `outro`). Every
+  helper takes its output stream and defaults to **stderr**. Do not use
+  Clack's `spinner()`: it calls `process.exit(0)` on Ctrl-C from raw mode,
+  which would defeat the two-stage SIGINT handling in `src/cli.ts`.
+- TDD: write the failing test first (`test/*.test.ts`), then implement.
+  Prompts are tested for real through `test/terminal.ts` (fake input and
+  output streams, key sequences from `KEY`); frame renderers are pure
+  functions asserted on directly; the spinner runs under fake timers. Thin
+  I/O adapters (`$EDITOR` spawn, live SDK calls) stay untested.
 - Safety behavior is load-bearing: `-x` must refuse dangerous commands
-  without `-f`, confirmation defaults to No, and only the command itself may
-  ever be written to stdout (all chrome goes to stderr, so pipes compose).
-  Two further invariants: candidates without a real model danger assessment
-  (`modelAssessed` false — the plain-text fallback) must never auto-execute
-  under `-x` without `-f` (`decideAction` in src/cli.ts pins this), and
-  every candidate passes `normaliseCommand` (src/prompts.ts) so control
-  characters or newlines can never make the confirmed text differ from the
-  executed text.
-- `prepack` builds `dist/aicmd.js`; publishing without it breaks every
-  plain-Node install (Node refuses to type-strip inside node_modules).
+  without `-f`, confirmation defaults to No (Enter, Escape, Ctrl-C and EOF
+  all mean No), and only the command itself may ever be written to stdout
+  (all chrome goes to stderr, so pipes compose). Two further invariants:
+  candidates without a real model danger assessment (`modelAssessed`
+  false — the plain-text fallback) must never auto-execute under `-x`
+  without `-f` (`decideAction` in src/cli.ts pins this), and every candidate
+  passes `normaliseCommand` (src/prompts.ts) so control characters or
+  newlines can never make the confirmed text differ from the executed text.
 
 ## Commands
 
 ```sh
-bun test               # test suite
-bun run typecheck      # tsc --noEmit
-bun run build          # bundle dist/aicmd.js (node target, deps external)
-bun run format         # prettier
-bun run bin/aicmd.ts   # run from source
+pnpm test              # vitest run
+pnpm run test:watch    # vitest
+pnpm run typecheck     # tsc --noEmit
+pnpm run build         # esbuild → dist/aicmd.js (node platform, ESM, deps external)
+pnpm start             # build, then run bin/aicmd.js as an install would
+pnpm run format        # prettier
+pnpm exec biome check  # lint (the pre-commit hook runs it via trunk)
+node bin/aicmd.ts      # run from source
 ```
-
-## Bun defaults (general)
-
-Default to Bun instead of Node.js for tooling:
-
-- `bun <file>`, `bun test`, `bun install`, `bun run <script>`, `bunx <pkg>`
-- Bun auto-loads `.env`; don't use dotenv.
-
-The Bun-native API preferences (Bun.serve, bun:sqlite, Bun.file, Bun.$, …)
-apply to Bun-only projects; **this package's `src/` is the documented
-exception** (see Rules above).
 
 <!-- skilld -->
 

@@ -5,13 +5,19 @@ confirm it, run it. Uses your **Claude Code subscription**, not an API key.
 
 ```console
 $ aicmd list the five largest files here
-
-────────────────────────────────────────────────
-find . -maxdepth 1 -type f -exec stat -f '%z %N' {} + | sort -rn | head -5
-────────────────────────────────────────────────
-Lists the five largest files in the current directory by size.
-
-Run this command? [y/N/e]
+┌  aicmd
+│
+◇  Command ────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│  find . -maxdepth 1 -type f -exec stat -f '%z %N' {} + | sort -rn | head -5  │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────╯
+│
+│  Lists the five largest files in the current directory by size.
+│
+◆  Run this command?
+│  y Yes · n No · e Edit  (Enter = No)
+└
 ```
 
 `aicmd` asks the model through the
@@ -24,18 +30,18 @@ markdown to regex apart. A local guard-pattern list (`rm`, `dd of=/dev/…`,
 ## Install
 
 ```sh
-bun add -g @synmux/aicmd     # or: npm install -g @synmux/aicmd
+pnpm add -g @synmux/aicmd     # or: npm install -g @synmux/aicmd
 ```
 
-Both `aicmd` and the shorter `ai` are installed. Bun is the preferred runtime
-and is picked up automatically when present; plain Node (≥ 22.12) works too —
-the launcher runs the bundled build, so no TypeScript support is required.
+Both `aicmd` and the shorter `ai` are installed. It runs on plain Node
+(≥ 22.12): installed copies use the bundled build, so no TypeScript support
+is required at run time.
 
-From a checkout:
+From a checkout (Node ≥ 22.18 runs the TypeScript sources directly):
 
 ```sh
-bun install
-bun run bin/aicmd.ts --help
+pnpm install
+node bin/aicmd.ts --help
 ```
 
 ## Authentication
@@ -125,21 +131,21 @@ back to plain text and the model's danger signal is lost. That degradation is
 never silent: every mode prints a note, and `-x` **refuses to auto-execute**
 on the pattern list alone (`-f` remains the escape hatch).
 
-The confirmation default is **No** — running a generated command takes a
-deliberate keypress. `e` opens the command in your `$EDITOR`
-(`GIT_EDITOR` ▸ `VISUAL` ▸ `EDITOR` ▸ `vi`) and then runs your edited text
-(the guard patterns still warn about it). EOF or Ctrl-C at the prompt counts
-as No.
+The confirmation is answered with a single keypress and its default is
+**No** — running a generated command takes a deliberate `y`. `e` opens the
+command in your `$EDITOR` (`GIT_EDITOR` ▸ `VISUAL` ▸ `EDITOR` ▸ `vi`) and then
+runs your edited text (the guard patterns still warn about it). Enter, Escape,
+Ctrl-C and EOF at the prompt all count as No.
 
 ## Interactive mode
 
 `aicmd -i` generates several candidates (higher temperature for variety) and
-opens a TUI list: ↑/↓ or `j`/`k` to move, ⏎ to run, `e` to edit first,
-`q`/Esc to cancel. Dangerous candidates are marked `⚠`, and running one with
-⏎ still goes through the full warning + confirmation — one keypress is never
-enough to run something destructive. `e` hands the command to your `$EDITOR`
-and runs what you save (with a pattern warning where it applies). If the TUI
-cannot initialize, a plain numbered prompt takes over.
+opens a picker that shows each command with its explanation: ↑/↓ or `j`/`k`
+to move, ⏎ to run, `e` to edit first, `q`/Esc to cancel. Dangerous candidates
+are marked `⚠` with the reason, and running one with ⏎ still goes through the
+full warning + confirmation — one keypress is never enough to run something
+destructive. `e` hands the command to your `$EDITOR` and runs what you save
+(with a pattern warning where it applies).
 
 Set `"interactive": true` in config to make this the default; `--no-interactive`
 opts out per run. Without a TTY the setting quietly degrades to printing.
@@ -186,8 +192,7 @@ All keys, with their defaults:
   switches to a regular expression (`"re:\\bterraform\\s+destroy\\b"`). Both
   match case-insensitively.
 - `spinner` is any [cli-spinners](https://github.com/sindresorhus/cli-spinners)
-  name, rendered by [ora](https://github.com/sindresorhus/ora). Unknown names
-  fall back to `material`.
+  name. Unknown names fall back to `material`.
 
 ## Limits worth knowing
 
@@ -202,11 +207,15 @@ All keys, with their defaults:
 ## Development
 
 ```sh
-bun test           # run the test suite
-bun run typecheck  # tsc --noEmit
-bun run build      # bundle dist/aicmd.js for plain-Node installs
+pnpm test            # vitest, once
+pnpm run test:watch  # vitest in watch mode
+pnpm run typecheck   # tsc --noEmit
+pnpm run build       # esbuild → dist/aicmd.js, the entry installed copies run
+pnpm start           # build, then run the launcher exactly as an install would
 ```
 
-The architecture follows the patterns of
-[claude-commit](https://github.com/synmux/claude-commit); see the design spec
-in `docs/superpowers/specs/`.
+Everything is TypeScript run natively by Node; the bundle exists only because
+Node will not strip types inside `node_modules`. The terminal layer is built
+on [Clack](https://github.com/bombshell-dev/clack), and the architecture
+otherwise follows [claude-commit](https://github.com/synmux/claude-commit);
+see the design spec in `docs/superpowers/specs/`.
