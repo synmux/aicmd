@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'vitest'
 import { buildQueryOptions, buildSubprocessEnv, presentCredentialVars } from '../src/agent.ts'
 
 const cleanEnv = { PATH: '/usr/bin', HOME: '/home/user' }

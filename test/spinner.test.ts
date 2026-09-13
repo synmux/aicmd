@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test'
 import spinners from 'cli-spinners'
+import { describe, expect, test } from 'vitest'
 import { DEFAULT_SPINNER, isSpinnerName, resolveSpinner } from '../src/ui/spinner.ts'
 
 describe('isSpinnerName', () => {

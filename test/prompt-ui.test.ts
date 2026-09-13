@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'vitest'
 import { parseConfirmAnswer, resolveEditor } from '../src/ui/prompt.ts'
 
 describe('parseConfirmAnswer', () => {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'vitest'
 import { buildProgram, decideAction, flagsToConfig, resolveRunMode, taskFromArgs } from '../src/cli.ts'
 
 describe('resolveRunMode', () => {

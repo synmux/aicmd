@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'vitest'
 import { DEFAULT_CONFIG } from '../src/config.ts'
 import { buildContextBlock, gatherContext, resolveShell, shellName } from '../src/context.ts'
 

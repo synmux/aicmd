@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'vitest'
 import { AicmdError } from '../src/errors.ts'
 import {
   assessDanger,

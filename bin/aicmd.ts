@@ -1,8 +1,8 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
- * TypeScript entry point for `aicmd` / `ai`, used directly under Bun and
- * under Node with native type stripping. `bin/aicmd.js` is the runtime
- * launcher that picks how to reach this file.
+ * TypeScript entry point for `aicmd` / `ai`, run under Node's native type
+ * stripping in a checkout and bundled into `dist/aicmd.js` for installs.
+ * `bin/aicmd.js` is the runtime launcher that picks how to reach this file.
  */
 import { run } from '../src/cli.ts'
 import { color } from '../src/ui/colors.ts'
