@@ -62,3 +62,38 @@ skills:
     source: "https://github.com/biomejs/biome/tree/@biomejs/biome@2.5.9/docs"
     syncedAt: 2026-08-19
     generator: skilld
+  clack-core-skilld:
+    packageName: "@clack/core"
+    version: 1.4.3
+    repo: bombshell-dev/clack
+    source: "https://bomb.sh/docs/clack/basics/getting-started/**"
+    syncedAt: 2026-09-13
+    generator: skilld
+  clack-prompts-skilld:
+    packageName: "@clack/prompts"
+    version: 1.7.0
+    repo: bombshell-dev/clack
+    source: "https://bomb.sh/docs/clack/basics/getting-started/**"
+    syncedAt: 2026-09-13
+    generator: skilld
+  esbuild-skilld:
+    packageName: esbuild
+    version: 0.28.2
+    repo: evanw/esbuild
+    source: "https://github.com/evanw/esbuild/tree/v0.28.2/docs"
+    syncedAt: 2026-09-13
+    generator: skilld
+  anthropic-ai-sdk-skilld:
+    packageName: "@anthropic-ai/sdk"
+    version: 0.117.1
+    repo: anthropics/anthropic-sdk-typescript
+    source: "ungh://anthropics/anthropic-sdk-typescript"
+    syncedAt: 2026-09-13
+    generator: skilld
+  vitest-skilld:
+    packageName: vitest
+    version: 5.0.0
+    repo: vitest-dev/vitest
+    source: "https://github.com/vitest-dev/vitest/tree/v5.0.0/docs"
+    syncedAt: 2026-09-13
+    generator: skilld
