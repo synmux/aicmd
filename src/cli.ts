@@ -11,6 +11,16 @@ import { executeCommand } from './exec.ts'
 import { generateCommands } from './generate.ts'
 import { assessDanger, effectivePatterns } from './safety.ts'
 import type { Config, DangerAssessment, PartialConfig } from './types.ts'
+import {
+  printCancelled,
+  printCommandBlock,
+  printDangerWarning,
+  printIntro,
+  printMuted,
+  printRefusal,
+  printRunAnnouncement,
+  printWarning
+} from './ui/chrome.ts'
 import { color } from './ui/colors.ts'
 import { askTask, confirmRun, editInEditor, readStdin } from './ui/prompt.ts'
 import { Spinner } from './ui/spinner.ts'
@@ -174,20 +184,6 @@ export function decideAction(args: {
   }
 }
 
-/** Print the command inside a dim rule block on stderr. */
-export function printCommandBlock(command: string): void {
-  const bar = color('90', '─'.repeat(48))
-  process.stderr.write(`\n${bar}\n${command}\n${bar}\n`)
-}
-
-/** Print the danger warning with its reasons on stderr. */
-export function printDangerWarning(danger: DangerAssessment): void {
-  process.stderr.write(`${color('33', '⚠  This command looks potentially destructive:')}\n`)
-  for (const reason of danger.reasons) {
-    process.stderr.write(`${color('33', `   • ${reason}`)}\n`)
-  }
-}
-
 interface FlowOptions {
   mode: RunMode
   force: boolean
@@ -292,6 +288,9 @@ async function runPlain(task: string, config: Config, flow: FlowOptions): Promis
   const shellPath = resolveShell(config.shell)
   const spinner = new Spinner(flow.spinnerEnabled && process.stderr.isTTY, config.spinner)
 
+  // The guide bar opens only where a human is watching; piped runs keep
+  // their stderr to plain lines (see `guide` in src/ui/chrome.ts).
+  if (process.stderr.isTTY) printIntro()
   spinner.start('Generating command')
   let result: Awaited<ReturnType<typeof generateCommands>>
   try {
@@ -309,9 +308,7 @@ async function runPlain(task: string, config: Config, flow: FlowOptions): Promis
   spinner.stop()
 
   if (flow.verbose) {
-    process.stderr.write(
-      `${color('90', `cost $${result.costUsd.toFixed(4)}${result.model ? ` (${result.model})` : ''}`)}\n`
-    )
+    printMuted(`cost $${result.costUsd.toFixed(4)}${result.model ? ` (${result.model})` : ''}`)
   }
 
   const candidate = result.candidates[0]
@@ -334,69 +331,59 @@ async function runPlain(task: string, config: Config, flow: FlowOptions): Promis
       if (danger.dangerous) printDangerWarning(danger)
       printDegradedSignalNote(danger)
       if (flow.mode === 'print') {
-        process.stderr.write(`${color('90', 'No interactive terminal: printing instead of running.')}\n`)
+        printMuted('No interactive terminal: printing instead of running.')
       }
       if (config.showExplanation && candidate.explanation !== '') {
-        process.stderr.write(`${color('90', candidate.explanation)}\n`)
+        printMuted(candidate.explanation)
       }
       process.stdout.write(`${candidate.command}\n`)
       return 0
     }
     case 'refuse-dangerous': {
-      process.stderr.write(`${color('31', '✖ SAFETY:')} refusing to auto-execute a potentially destructive command.\n`)
+      printRefusal(['SAFETY: refusing to auto-execute a potentially destructive command.'])
       printDangerWarning(danger)
       printCommandBlock(candidate.command)
-      process.stderr.write(
-        'Re-run with --force (-f) to execute anyway, or without --execute ' + '(-x) for a confirmation prompt.\n'
-      )
+      printCancelled(RERUN_HINT)
       return 1
     }
     case 'refuse-unassessed': {
-      process.stderr.write(
-        color('31', '✖ SAFETY:') +
-          " refusing to auto-execute: the model's danger self-assessment was " +
-          'unavailable (plain-text fallback), so only the local guard ' +
-          'patterns were checked.\n'
-      )
+      printRefusal([
+        "SAFETY: refusing to auto-execute: the model's danger self-assessment was",
+        'unavailable (plain-text fallback), so only the local guard patterns were checked.'
+      ])
       printCommandBlock(candidate.command)
-      process.stderr.write(
-        'Re-run with --force (-f) to execute anyway, or without --execute ' + '(-x) for a confirmation prompt.\n'
-      )
+      printCancelled(RERUN_HINT)
       return 1
     }
     case 'run': {
       if (danger.dangerous) {
-        process.stderr.write(`${color('33', '⚠  FORCE MODE: executing despite the danger flags.')}\n`)
+        printWarning(['FORCE MODE: executing despite the danger flags.'])
         printDangerWarning(danger)
       }
       printDegradedSignalNote(danger)
       if (config.showExplanation && candidate.explanation !== '') {
-        process.stderr.write(`${color('90', candidate.explanation)}\n`)
+        printMuted(candidate.explanation)
       }
       return await runCommand(candidate.command, shellPath)
     }
     case 'confirm': {
       printCommandBlock(candidate.command)
       if (config.showExplanation && candidate.explanation !== '') {
-        process.stderr.write(`${color('90', candidate.explanation)}\n`)
+        printMuted(candidate.explanation)
       }
-      if (danger.dangerous) {
-        process.stderr.write('\n')
-        printDangerWarning(danger)
-      }
+      if (danger.dangerous) printDangerWarning(danger)
       printDegradedSignalNote(danger)
-      process.stderr.write('\n')
 
       const choice = await confirmRun()
       if (choice === 'no') {
-        process.stderr.write('Cancelled. Nothing was executed.\n')
+        printCancelled('Cancelled. Nothing was executed.')
         return 1
       }
       let command = candidate.command
       if (choice === 'edit') {
         command = (await editInEditor(command)).trim()
         if (command === '') {
-          process.stderr.write('Cancelled: empty command.\n')
+          printCancelled('Cancelled: empty command.')
           return 1
         }
         // The user wrote the edited command themselves, so it runs without
@@ -418,17 +405,16 @@ async function runPlain(task: string, config: Config, flow: FlowOptions): Promis
  */
 function printDegradedSignalNote(danger: DangerAssessment): void {
   if (danger.modelSignalAvailable) return
-  process.stderr.write(
-    `${color(
-      '90',
-      "Note: the model's danger self-assessment was unavailable " +
-        '(plain-text fallback); only local guard patterns were applied.'
-    )}\n`
+  printMuted(
+    "Note: the model's danger self-assessment was unavailable " +
+      '(plain-text fallback); only local guard patterns were applied.'
   )
 }
 
+const RERUN_HINT = 'Re-run with --force (-f) to execute anyway, or without --execute (-x) for a confirmation prompt.'
+
 /** Announce and execute the final command, returning its exit code. */
 export async function runCommand(command: string, shellPath: string): Promise<number> {
-  process.stderr.write(`${color('36', '▶')} ${command}\n`)
+  printRunAnnouncement(command)
   return await executeCommand(command, shellPath)
 }

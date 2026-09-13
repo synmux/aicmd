@@ -2,58 +2,43 @@
  * Terminal input helpers: asking for the task when argv is empty, reading a
  * piped task from stdin, the run confirmation prompt, and `$EDITOR`
  * integration for tweaking a command before it runs.
+ *
+ * Prompts are built on Clack primitives and render to **stderr**, keeping
+ * stdout for the command alone. Every prompt accepts its streams so tests
+ * can drive it through fakes.
  */
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createInterface } from 'node:readline'
+import type { Readable, Writable } from 'node:stream'
+import { styleText } from 'node:util'
+import { isCancel, SelectKeyPrompt } from '@clack/core'
+import { S_BAR, S_BAR_END, S_STEP_ACTIVE, S_STEP_CANCEL, S_STEP_SUBMIT, text } from '@clack/prompts'
 import { AicmdError } from '../errors.ts'
+import { CHROME_STREAM } from './chrome.ts'
+
+/** Streams a prompt reads from and renders to; defaults are stdin and stderr. */
+export interface PromptStreams {
+  input?: Readable
+  output?: Writable
+}
 
 /** Resolve the editor command, mirroring git's lookup order. */
 export function resolveEditor(env: Record<string, string | undefined> = process.env): string {
   return env.GIT_EDITOR || env.VISUAL || env.EDITOR || 'vi'
 }
 
-type ReadlineInterface = ReturnType<typeof createInterface>
-
-/**
- * Ask one question, resolving `null` when the user bails out: EOF (Ctrl-D
- * closes the interface) or Ctrl-C (readline swallows the process SIGINT and
- * emits its own event, so without this the promise would simply never
- * settle and the CLI would hang).
- */
-export function askLine(rl: ReadlineInterface, promptText: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    let settled = false
-    const finish = (value: string | null): void => {
-      if (settled) return
-      settled = true
-      rl.off('close', onClose)
-      rl.off('SIGINT', onSigint)
-      resolve(value)
-    }
-    const onClose = (): void => finish(null)
-    const onSigint = (): void => {
-      process.stderr.write('\n')
-      finish(null)
-    }
-    rl.once('close', onClose)
-    rl.once('SIGINT', onSigint)
-    rl.question(promptText, (answer) => finish(answer))
-  })
-}
-
 /** Ask for the task interactively (stderr prompt, requires a TTY on stdin). */
-export async function askTask(): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr })
-  try {
-    const answer = await askLine(rl, 'What should the command do? ')
-    return (answer ?? '').trim()
-  } finally {
-    rl.close()
-  }
+export async function askTask(streams: PromptStreams = {}): Promise<string> {
+  const answer = await text({
+    message: 'What should the command do?',
+    placeholder: 'e.g. list the five largest files here',
+    input: streams.input ?? process.stdin,
+    output: streams.output ?? CHROME_STREAM
+  })
+  return isCancel(answer) ? '' : answer.trim()
 }
 
 /** Read the whole of stdin as the task (for `echo task | aicmd`). */
@@ -82,20 +67,62 @@ export function parseConfirmAnswer(answer: string): ConfirmChoice | null {
   return null
 }
 
-/** Prompt for [y]es / [N]o / [e]dit on stderr. EOF and Ctrl-C mean No. */
-export async function confirmRun(): Promise<ConfirmChoice> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr })
-  try {
-    for (;;) {
-      const answer = await askLine(rl, 'Run this command? [y/N/e] ')
-      if (answer === null) return 'no'
-      const choice = parseConfirmAnswer(answer)
-      if (choice !== null) return choice
-      process.stderr.write('Please answer y, n, or e.\n')
-    }
-  } finally {
-    rl.close()
+const CONFIRM_LABELS: Record<ConfirmChoice, string> = { yes: 'Yes', no: 'No', edit: 'Edit' }
+
+export interface ConfirmFrame {
+  state: 'initial' | 'active' | 'submit' | 'cancel' | 'error' | 'validating'
+  choice?: ConfirmChoice
+}
+
+/**
+ * The confirm prompt's frame, extracted as a pure function so its content
+ * can be asserted on without a terminal. While open it lists the keys; once
+ * settled it collapses to the answer.
+ */
+export function renderConfirmFrame(frame: ConfirmFrame): string {
+  const question = 'Run this command?'
+  const bar = styleText('gray', S_BAR)
+  if (frame.state === 'submit' || frame.state === 'cancel') {
+    const symbol = frame.state === 'submit' ? styleText('green', S_STEP_SUBMIT) : styleText('red', S_STEP_CANCEL)
+    const answer = CONFIRM_LABELS[frame.choice ?? 'no']
+    return `${bar}\n${symbol}  ${question} ${styleText('dim', answer)}`
   }
+  const key = (letter: string, label: string): string => `${styleText('bold', letter)} ${label}`
+  const options = [key('y', 'Yes'), key('n', 'No'), key('e', 'Edit')].join(styleText('dim', ' · '))
+  const hint = styleText('dim', '(Enter = No)')
+  return [
+    bar,
+    `${styleText('cyan', S_STEP_ACTIVE)}  ${question}`,
+    `${styleText('cyan', S_BAR)}  ${options}  ${hint}`,
+    styleText('cyan', S_BAR_END)
+  ].join('\n')
+}
+
+/**
+ * Prompt for [y]es / [N]o / [e]dit on stderr. A single keypress answers;
+ * Enter alone, Escape, Ctrl-C and EOF all mean **No**.
+ */
+export async function confirmRun(streams: PromptStreams = {}): Promise<ConfirmChoice> {
+  let choice: ConfirmChoice | undefined
+  const prompt = new SelectKeyPrompt<{ value: ConfirmChoice }>({
+    // Clack keys each option on the first character of its value (n/y/e).
+    // Enter submits without a key: the prompt resolves `undefined`, which
+    // is mapped to No below - the default must never be Yes.
+    options: [{ value: 'no' }, { value: 'yes' }, { value: 'edit' }],
+    initialValue: 'no',
+    input: streams.input ?? process.stdin,
+    output: streams.output ?? CHROME_STREAM,
+    render() {
+      return renderConfirmFrame({ state: this.state, ...(choice !== undefined ? { choice } : {}) })
+    }
+  })
+  prompt.on('key', (char) => {
+    const parsed = typeof char === 'string' && char !== '' ? parseConfirmAnswer(char) : null
+    if (parsed !== null) choice = parsed
+  })
+  const answer = await prompt.prompt()
+  if (isCancel(answer) || answer === undefined) return 'no'
+  return answer
 }
 
 /** Open `initial` in the user's editor and return the saved contents. */

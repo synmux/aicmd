@@ -2,23 +2,43 @@
  * Interactive mode: generate several candidate commands, then let the user
  * pick one (and optionally edit it) before running it.
  *
- * The picker is an OpenTUI selection screen. All key handling is driven
- * through the renderer's global key handler so there is a single source of
- * truth for navigation. If the TUI cannot be initialized for any reason, we
- * transparently fall back to a plain readline prompt.
+ * The picker is a Clack `SelectPrompt` with a custom frame: every candidate
+ * shows its command and, underneath, its explanation (or danger reason), so
+ * the user can compare them without moving the cursor. Key handling is
+ * Clack's (↑/↓, j/k, Enter, Escape, Ctrl-C) plus two of our own: `e` to
+ * edit the highlighted candidate and `q` to cancel.
  *
  * Choosing a dangerous candidate with ⏎ does not run it immediately: the
  * picker closes and the normal warning + [y/N/e] confirmation appears, so a
  * destructive command always costs a second deliberate keypress.
  */
-import { createInterface } from 'node:readline'
-import { printCommandBlock, printDangerWarning, runCommand } from '../cli.ts'
+import type { Writable } from 'node:stream'
+import { styleText } from 'node:util'
+import { isCancel, SelectPrompt } from '@clack/core'
+import {
+  limitOptions,
+  S_BAR,
+  S_BAR_END,
+  S_RADIO_ACTIVE,
+  S_RADIO_INACTIVE,
+  S_STEP_ACTIVE,
+  S_STEP_CANCEL,
+  S_STEP_SUBMIT
+} from '@clack/prompts'
+import { runCommand } from '../cli.ts'
 import { gatherContext, resolveShell } from '../context.ts'
 import { type GenerateResult, generateCommands } from '../generate.ts'
 import { assessDanger, effectivePatterns } from '../safety.ts'
 import type { Config, DangerAssessment, GeneratedCommand } from '../types.ts'
-import { color } from './colors.ts'
-import { askLine, confirmRun, editInEditor } from './prompt.ts'
+import {
+  CHROME_STREAM,
+  printCancelled,
+  printCommandBlock,
+  printDangerWarning,
+  printIntro,
+  printMuted
+} from './chrome.ts'
+import { confirmRun, editInEditor, type PromptStreams } from './prompt.ts'
 import { Spinner } from './spinner.ts'
 
 export interface InteractiveOptions {
@@ -34,7 +54,7 @@ export interface PickerEntry {
   danger: DangerAssessment
 }
 
-type Selection = { action: 'run' | 'edit'; index: number } | { action: 'cancel' }
+export type Selection = { action: 'run' | 'edit'; index: number } | { action: 'cancel' }
 
 /** The list label for a candidate: the command, danger-marked when needed. */
 export function pickerEntryLabel(entry: PickerEntry): string {
@@ -42,7 +62,7 @@ export function pickerEntryLabel(entry: PickerEntry): string {
 }
 
 /** The one-line description under a candidate: explanation and/or danger reason. */
-function pickerEntryDescription(entry: PickerEntry): string {
+export function pickerEntryDescription(entry: PickerEntry): string {
   const explanation = entry.candidate.explanation
   if (!entry.danger.dangerous) return explanation
   const reason = entry.danger.reasons[0] ?? 'potentially destructive'
@@ -55,6 +75,7 @@ export async function runInteractive(task: string, config: Config, opts: Interac
   const shellPath = resolveShell(config.shell)
   const spinner = new Spinner(opts.spinnerEnabled && process.stderr.isTTY, config.spinner)
 
+  printIntro()
   spinner.start(`Generating ${count} option${count === 1 ? '' : 's'}`)
   let result: GenerateResult
   try {
@@ -73,9 +94,7 @@ export async function runInteractive(task: string, config: Config, opts: Interac
   spinner.stop()
 
   if (opts.verbose) {
-    process.stderr.write(
-      `${color('90', `cost $${result.costUsd.toFixed(4)}${result.model ? ` (${result.model})` : ''}`)}\n`
-    )
+    printMuted(`cost $${result.costUsd.toFixed(4)}${result.model ? ` (${result.model})` : ''}`)
   }
 
   const patterns = effectivePatterns(config)
@@ -87,31 +106,22 @@ export async function runInteractive(task: string, config: Config, opts: Interac
   // A human confirms every run in this mode, but a degraded danger signal
   // (plain-text fallback: no model self-assessment) is still worth a note.
   if (entries.some((entry) => !entry.danger.modelSignalAvailable)) {
-    process.stderr.write(
-      `${color(
-        '90',
-        "Note: the model's danger self-assessment was unavailable " +
-          '(plain-text fallback); only local guard patterns were applied.'
-      )}\n`
+    printMuted(
+      "Note: the model's danger self-assessment was unavailable " +
+        '(plain-text fallback); only local guard patterns were applied.'
     )
   }
 
-  let selection: Selection
-  try {
-    selection = await selectWithTui(entries)
-  } catch {
-    // TUI failed to initialize (unusual terminal, etc.) - degrade gracefully.
-    selection = await selectWithReadline(entries)
-  }
+  const selection = await selectCommand(entries)
 
   if (selection.action === 'cancel') {
-    process.stderr.write('Cancelled. Nothing was executed.\n')
+    printCancelled('Cancelled. Nothing was executed.')
     return 1
   }
 
   const entry = entries[selection.index]
   if (entry === undefined) {
-    // Both pickers only ever return indices into `entries`; anything else is
+    // The picker only ever returns indices into `entries`; anything else is
     // a programming error, and failing loudly beats running the wrong command.
     throw new Error(`Picker returned out-of-range index ${selection.index}`)
   }
@@ -120,7 +130,7 @@ export async function runInteractive(task: string, config: Config, opts: Interac
   if (selection.action === 'edit') {
     command = (await editInEditor(command)).trim()
     if (command === '') {
-      process.stderr.write('Cancelled: empty command.\n')
+      printCancelled('Cancelled: empty command.')
       return 1
     }
     warnIfEditedDangerous(command, patterns)
@@ -132,16 +142,15 @@ export async function runInteractive(task: string, config: Config, opts: Interac
   if (entry.danger.dangerous) {
     printCommandBlock(command)
     printDangerWarning(entry.danger)
-    process.stderr.write('\n')
     const choice = await confirmRun()
     if (choice === 'no') {
-      process.stderr.write('Cancelled. Nothing was executed.\n')
+      printCancelled('Cancelled. Nothing was executed.')
       return 1
     }
     if (choice === 'edit') {
       command = (await editInEditor(command)).trim()
       if (command === '') {
-        process.stderr.write('Cancelled: empty command.\n')
+        printCancelled('Cancelled: empty command.')
         return 1
       }
       warnIfEditedDangerous(command, patterns)
@@ -158,208 +167,92 @@ function warnIfEditedDangerous(command: string, patterns: string[]): void {
 }
 
 /**
- * Rows a single candidate occupies in the picker: the command line plus a
- * one-line description (`showDescription`), with OpenTUI's default
- * `itemSpacing` of 0. Mirrors SelectRenderable's own line accounting.
- */
-const PICKER_LINES_PER_ITEM = 2
-
-/**
- * Rows reserved for the non-picker chrome when capping its height: root
- * padding (2), the header line (1) and the gap below it (1).
+ * Rows the frame uses besides the candidate list (leading bar, header,
+ * closing bar, and the prompt's trailing newline); the list is capped to
+ * what remains of the terminal and scrolls inside that.
  */
 const PICKER_CHROME_ROWS = 4
 
-/**
- * The picker's height, sized to its content (two rows per candidate) but
- * capped to the terminal so a large `interactiveCount` still fits; past the
- * cap the list scrolls internally (see `showScrollIndicator` in
- * {@link buildPickerScene}). An explicit height keeps the picker compact -
- * only as tall as the options need - rather than stretching to fill the
- * screen.
- */
-export function pickerHeight(count: number, terminalRows: number): number {
-  const wanted = Math.max(1, count) * PICKER_LINES_PER_ITEM
-  const cap = Math.max(PICKER_LINES_PER_ITEM, terminalRows - PICKER_CHROME_ROWS)
-  return Math.min(wanted, cap)
+export interface PickerFrame {
+  entries: PickerEntry[]
+  cursor: number
+  state: 'initial' | 'active' | 'submit' | 'cancel' | 'error' | 'validating'
+  /** The stream the frame will be drawn on; its size decides the scroll window. */
+  output: Writable
 }
 
-/** The `@opentui/core` module, however it is obtained (dynamic import or test). */
-type TuiModule = typeof import('@opentui/core')
-/** The renderer object returned by `createCliRenderer` (and the headless test renderer). */
-type TuiRenderer = Awaited<ReturnType<TuiModule['createCliRenderer']>>
-
-/** The renderables the caller wires key handling to after building the scene. */
-export interface PickerScene {
-  root: InstanceType<TuiModule['BoxRenderable']>
-  select: InstanceType<TuiModule['SelectRenderable']>
+/** One candidate as two rows: the (marked) command, then its description. */
+function formatPickerItem(entry: PickerEntry, active: boolean): string {
+  const label = pickerEntryLabel(entry)
+  const marker = active ? styleText('green', S_RADIO_ACTIVE) : styleText('dim', S_RADIO_INACTIVE)
+  const command = entry.danger.dangerous ? styleText('yellow', label) : active ? label : styleText('dim', label)
+  const description = pickerEntryDescription(entry)
+  const detail = description === '' ? '' : `\n  ${styleText('dim', description)}`
+  return `${marker} ${command}${detail}`
 }
 
 /**
- * Build the picker's renderable tree: a header line above the candidate list.
- * Extracted from {@link selectWithTui} so the layout can be rendered under
- * OpenTUI's headless test renderer and asserted on. The caller adds `root` to
- * the renderer and wires key handling to the returned `select`.
+ * The picker's frame, extracted as a pure function so its content can be
+ * asserted on without a terminal. Overflow is handled by Clack's
+ * `limitOptions`, which keeps the cursor in view and marks hidden rows.
  */
-export function buildPickerScene(
-  renderer: TuiRenderer,
-  tui: TuiModule,
-  entries: PickerEntry[],
-  terminalRows: number
-): PickerScene {
-  const { BoxRenderable, TextRenderable, SelectRenderable } = tui
+export function renderPickerFrame(frame: PickerFrame): string {
+  const question = 'Pick a command'
+  const grayBar = styleText('gray', S_BAR)
+  const chosen = frame.entries[frame.cursor]
+  const chosenLabel = chosen === undefined ? '' : pickerEntryLabel(chosen)
 
-  const root = new BoxRenderable(renderer, {
-    flexDirection: 'column',
-    width: '100%',
-    height: '100%',
-    padding: 1,
-    gap: 1
-  })
-
-  const header = new TextRenderable(renderer, {
-    content: 'Pick a command   ↑/↓ select · ⏎ run · e edit · q cancel'
-  })
-
-  // A compact, content-sized list of the candidates. flexShrink:0 keeps it at
-  // its full height; showScrollIndicator covers more options than fit.
-  const select = new SelectRenderable(renderer, {
-    height: pickerHeight(entries.length, terminalRows),
-    flexShrink: 0,
-    showScrollIndicator: true,
-    options: entries.map((entry, index) => ({
-      name: pickerEntryLabel(entry),
-      description: pickerEntryDescription(entry),
-      value: index
-    })),
-    selectedIndex: 0,
-    showDescription: true,
-    wrapSelection: true,
-    // A calm slate highlight (OpenTUI's own default background) with soft
-    // near-white text. The default description greys read fine on the slate.
-    selectedBackgroundColor: '#334455',
-    selectedTextColor: '#e6edf3'
-  })
-
-  root.add(header)
-  root.add(select)
-
-  return { root, select }
-}
-
-/** The OpenTUI selection screen. Resolves with the user's choice. */
-async function selectWithTui(entries: PickerEntry[]): Promise<Selection> {
-  const tui = await import('@opentui/core')
-  const renderer = await tui.createCliRenderer({ exitOnCtrlC: false })
-
-  return await new Promise<Selection>((resolve, reject) => {
-    let settled = false
-    let onKey: (key: { name?: string; ctrl?: boolean }) => void = () => {}
-
-    const cleanup = () => {
-      try {
-        renderer.keyInput.off('keypress', onKey)
-      } catch {
-        /* ignore */
-      }
-      try {
-        renderer.destroy()
-      } catch {
-        /* ignore */
-      }
-    }
-    const finish = (selection: Selection) => {
-      if (settled) return
-      settled = true
-      cleanup()
-      resolve(selection)
-    }
-
-    try {
-      const terminalRows = process.stdout.rows ?? 24
-      const { root, select } = buildPickerScene(renderer, tui, entries, terminalRows)
-      renderer.root.add(root)
-
-      onKey = (key) => {
-        if (!key) return // some terminals can emit empty/unknown key events
-        try {
-          switch (key.name) {
-            case 'up':
-            case 'k':
-              select.moveUp()
-              renderer.requestRender()
-              break
-            case 'down':
-            case 'j':
-              select.moveDown()
-              renderer.requestRender()
-              break
-            case 'return':
-            case 'enter':
-              finish({ action: 'run', index: select.getSelectedIndex() })
-              break
-            case 'e':
-              finish({ action: 'edit', index: select.getSelectedIndex() })
-              break
-            case 'q':
-            case 'escape':
-              finish({ action: 'cancel' })
-              break
-            case 'c':
-              if (key.ctrl) finish({ action: 'cancel' })
-              break
-          }
-        } catch {
-          // A renderable method threw unexpectedly. Rather than let the error
-          // escape the key handler and leave the terminal stuck in raw mode,
-          // cancel cleanly - finish() restores the terminal via cleanup().
-          finish({ action: 'cancel' })
-        }
-      }
-
-      renderer.keyInput.on('keypress', onKey)
-      renderer.start()
-      renderer.requestRender()
-    } catch (err) {
-      cleanup()
-      reject(err)
-    }
-  })
-}
-
-/** Plain-prompt fallback when the TUI is unavailable. */
-async function selectWithReadline(entries: PickerEntry[]): Promise<Selection> {
-  process.stderr.write('\nCandidate commands:\n')
-  entries.forEach((entry, index) => {
-    process.stderr.write(`  ${index + 1}. ${pickerEntryLabel(entry)}\n`)
-    const description = pickerEntryDescription(entry)
-    if (description !== '') {
-      process.stderr.write(`${color('90', `     ${description}`)}\n`)
-    }
-  })
-
-  const rl = createInterface({ input: process.stdin, output: process.stderr })
-  try {
-    for (;;) {
-      const raw = await askLine(rl, `Choose 1-${entries.length}, "e N" to edit, or q to quit: `)
-      if (raw === null) return { action: 'cancel' }
-      const answer = raw.trim().toLowerCase()
-
-      if (answer === 'q' || answer === '') return { action: 'cancel' }
-
-      const editDigits = answer.match(/^e\s*(\d+)$/)?.[1]
-      if (editDigits !== undefined) {
-        const index = parseInt(editDigits, 10) - 1
-        if (index >= 0 && index < entries.length) return { action: 'edit', index }
-      }
-
-      const choice = parseInt(answer, 10)
-      if (choice >= 1 && choice <= entries.length) {
-        return { action: 'run', index: choice - 1 }
-      }
-      process.stderr.write('Invalid choice.\n')
-    }
-  } finally {
-    rl.close()
+  if (frame.state === 'submit') {
+    return `${grayBar}\n${styleText('green', S_STEP_SUBMIT)}  ${question}\n${grayBar}  ${styleText('dim', chosenLabel)}`
   }
+  if (frame.state === 'cancel') {
+    return `${grayBar}\n${styleText('red', S_STEP_CANCEL)}  ${question}\n${grayBar}  ${styleText(['strikethrough', 'dim'], chosenLabel)}`
+  }
+
+  const help = styleText('dim', '↑/↓ move · ⏎ run · e edit · q cancel')
+  const prefix = `${styleText('cyan', S_BAR)}  `
+  const rows = limitOptions({
+    cursor: frame.cursor,
+    options: frame.entries,
+    output: frame.output,
+    rowPadding: PICKER_CHROME_ROWS,
+    columnPadding: prefix.length,
+    style: formatPickerItem
+  })
+  return [
+    grayBar,
+    `${styleText('cyan', S_STEP_ACTIVE)}  ${question}  ${help}`,
+    ...rows.map((row) => `${prefix}${row}`),
+    styleText('cyan', S_BAR_END)
+  ].join('\n')
+}
+
+/**
+ * Show the picker and resolve with the user's choice. Streams default to
+ * stdin and stderr; tests inject fakes.
+ */
+export async function selectCommand(entries: PickerEntry[], streams: PromptStreams = {}): Promise<Selection> {
+  const output = streams.output ?? CHROME_STREAM
+  let action: 'run' | 'edit' = 'run'
+  const prompt = new SelectPrompt<{ value: number }>({
+    options: entries.map((_entry, index) => ({ value: index })),
+    initialValue: 0,
+    input: streams.input ?? process.stdin,
+    output,
+    render() {
+      return renderPickerFrame({ entries, cursor: this.cursor, state: this.state, output })
+    }
+  })
+  prompt.on('key', (char) => {
+    if (char === 'e') {
+      action = 'edit'
+      prompt.state = 'submit'
+    } else if (char === 'q') {
+      prompt.state = 'cancel'
+    }
+  })
+
+  const value = await prompt.prompt()
+  if (isCancel(value) || value === undefined) return { action: 'cancel' }
+  return { action, index: value }
 }

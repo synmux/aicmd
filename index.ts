@@ -18,8 +18,6 @@ export {
   decideAction,
   flagsToConfig,
   type PlainAction,
-  printCommandBlock,
-  printDangerWarning,
   type RunMode,
   resolveRunMode,
   run,
@@ -77,3 +75,13 @@ export type {
   ModelResult,
   PartialConfig
 } from './src/types.ts'
+export {
+  printCancelled,
+  printCommandBlock,
+  printDangerWarning,
+  printIntro,
+  printMuted,
+  printRefusal,
+  printRunAnnouncement,
+  printWarning
+} from './src/ui/chrome.ts'
