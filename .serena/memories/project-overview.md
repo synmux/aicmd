@@ -38,7 +38,7 @@ assessment, asks y/N/e, and runs it. Replaces the user's fish `ai` function.
   - strictMcpConfig, settingSources [], maxTurns 1; ANTHROPIC_API_KEY/
     AUTH_TOKEN stripped unless allowApiKey.
 - Tests: `pnpm test` (vitest; TDD — tests written first), `pnpm run
-  typecheck`, `pnpm run build`. Prompts are tested for real via
+typecheck`, `pnpm run build`. Prompts are tested for real via
   `test/terminal.ts` (PassThrough input + collecting Writable with
   columns/rows; `press()` waits 80ms after a lone Escape for readline's
   escape timeout). Spinner tests use vi.useFakeTimers.
