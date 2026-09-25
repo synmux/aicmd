@@ -10,8 +10,8 @@ export {
   presentCredentialVars,
   type RunPromptOptions,
   runPrompt,
-  type SubprocessEnvOptions,
-} from "./src/agent.ts";
+  type SubprocessEnvOptions
+} from './src/agent.ts'
 export {
   buildProgram,
   type CliOptions,
@@ -23,8 +23,8 @@ export {
   run,
   runCommand,
   taskFromArgs,
-  VERSION,
-} from "./src/cli.ts";
+  VERSION
+} from './src/cli.ts'
 export {
   DEFAULT_CONFIG,
   globalConfigDir,
@@ -33,12 +33,12 @@ export {
   mergeConfig,
   mergePartial,
   resolveConfig,
-  sanitizePartial,
-} from "./src/config.ts";
-export { buildContextBlock, type ContextInfo, gatherContext, resolveShell, shellName } from "./src/context.ts";
-export { AicmdError } from "./src/errors.ts";
-export { executeCommand, signalExitCode } from "./src/exec.ts";
-export { type GenerateOptions, type GenerateProgress, type GenerateResult, generateCommands } from "./src/generate.ts";
+  sanitizePartial
+} from './src/config.ts'
+export { buildContextBlock, type ContextInfo, gatherContext, resolveShell, shellName } from './src/context.ts'
+export { AicmdError } from './src/errors.ts'
+export { executeCommand, signalExitCode } from './src/exec.ts'
+export { type GenerateOptions, type GenerateProgress, type GenerateResult, generateCommands } from './src/generate.ts'
 export {
   buildSystem,
   buildUser,
@@ -48,16 +48,16 @@ export {
   normaliseCommand,
   OPTION_DELIMITER,
   plainToCandidates,
-  type SystemPromptOptions,
-} from "./src/prompts.ts";
+  type SystemPromptOptions
+} from './src/prompts.ts'
 export {
   assessDanger,
   compilePattern,
   DEFAULT_DANGEROUS_PATTERNS,
   effectivePatterns,
-  matchDangerousPattern,
-} from "./src/safety.ts";
-export type { Config, DangerAssessment, GeneratedCommand, ModelResult, PartialConfig } from "./src/types.ts";
+  matchDangerousPattern
+} from './src/safety.ts'
+export type { Config, DangerAssessment, GeneratedCommand, ModelResult, PartialConfig } from './src/types.ts'
 export {
   printCancelled,
   printCommandBlock,
@@ -66,5 +66,5 @@ export {
   printMuted,
   printRefusal,
   printRunAnnouncement,
-  printWarning,
-} from "./src/ui/chrome.ts";
+  printWarning
+} from './src/ui/chrome.ts'

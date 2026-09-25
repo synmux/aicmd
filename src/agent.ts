@@ -14,39 +14,39 @@
  * beyond the prompt we build, and the model can never execute anything while
  * "only writing a command".
  */
-import { type Options, query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { AicmdError } from "./errors.ts";
-import type { ModelResult } from "./types.ts";
+import { type Options, query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import { AicmdError } from './errors.ts'
+import type { ModelResult } from './types.ts'
 
 export interface RunPromptOptions {
   /** Model string (alias like `sonnet`, `haiku`, or a full model id). */
-  model: string;
+  model: string
   /** Full custom system prompt. */
-  system: string;
+  system: string
   /** Abort the in-flight request. */
-  abortController?: AbortController;
+  abortController?: AbortController
   /** Receives the underlying CLI's stderr (for `--verbose`). */
-  onStderr?: (data: string) => void;
+  onStderr?: (data: string) => void
   /**
    * Sampling temperature. Passed to the model via `CLAUDE_CODE_EXTRA_BODY`.
    * Used to add variety when generating several interactive options. Models
    * that don't accept a temperature override will reject the request, so the
    * caller should be prepared to retry without it.
    */
-  temperature?: number;
+  temperature?: number
   /**
    * Request a structured JSON response matching this schema. The parsed
    * object is returned on {@link ModelResult.structured}. Models that don't
    * support structured outputs will reject the request, so the caller should
    * be prepared to retry without it.
    */
-  outputFormat?: { type: "json_schema"; schema: Record<string, unknown> };
+  outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> }
   /**
    * Allow API credentials from the environment to reach the SDK subprocess.
    * Defaults to false: `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are
    * stripped so the run is billed to the Claude subscription.
    */
-  allowApiKey?: boolean;
+  allowApiKey?: boolean
 }
 
 /**
@@ -55,26 +55,26 @@ export interface RunPromptOptions {
  * pay-as-you-go API billing, so they are stripped from the subprocess
  * environment unless the user opts in via the `allowApiKey` config option.
  */
-export const GATED_CREDENTIAL_VARS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] as const;
+export const GATED_CREDENTIAL_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const
 
 /**
  * Names of the gated credential variables present in `env`. An empty string
  * counts as present, since presence alone perturbs credential resolution.
  */
 export function presentCredentialVars(env: Record<string, string | undefined>): string[] {
-  return GATED_CREDENTIAL_VARS.filter((name) => env[name] !== undefined);
+  return GATED_CREDENTIAL_VARS.filter((name) => env[name] !== undefined)
 }
 
 export interface SubprocessEnvOptions {
   /** Environment to derive the subprocess environment from (usually `process.env`). */
-  baseEnv: Record<string, string | undefined>;
+  baseEnv: Record<string, string | undefined>
   /**
    * Pass API credential variables through instead of stripping them.
    * Defaults to false so the gate fails safe when a caller omits it.
    */
-  allowApiKey?: boolean;
+  allowApiKey?: boolean
   /** Sampling temperature to inject via `CLAUDE_CODE_EXTRA_BODY`, preserving any existing extra body. */
-  temperature?: number;
+  temperature?: number
 }
 
 /**
@@ -87,54 +87,54 @@ export interface SubprocessEnvOptions {
  * billing to pay-as-you-go.
  */
 export function buildSubprocessEnv(opts: SubprocessEnvOptions): Record<string, string | undefined> | undefined {
-  const { baseEnv, allowApiKey = false, temperature } = opts;
-  const stripped = allowApiKey ? [] : presentCredentialVars(baseEnv);
-  if (stripped.length === 0 && temperature == null) return undefined;
+  const { baseEnv, allowApiKey = false, temperature } = opts
+  const stripped = allowApiKey ? [] : presentCredentialVars(baseEnv)
+  if (stripped.length === 0 && temperature == null) return undefined
 
-  const env = { ...baseEnv };
-  for (const name of stripped) delete env[name];
+  const env = { ...baseEnv }
+  for (const name of stripped) delete env[name]
 
   if (temperature != null) {
-    let extra: Record<string, unknown> = {};
-    const existing = baseEnv.CLAUDE_CODE_EXTRA_BODY;
+    let extra: Record<string, unknown> = {}
+    const existing = baseEnv.CLAUDE_CODE_EXTRA_BODY
     if (existing) {
       try {
-        const parsed: unknown = JSON.parse(existing);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          extra = parsed as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(existing)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          extra = parsed as Record<string, unknown>
         }
       } catch {
         /* ignore a malformed existing value */
       }
     }
-    env.CLAUDE_CODE_EXTRA_BODY = JSON.stringify({ ...extra, temperature });
+    env.CLAUDE_CODE_EXTRA_BODY = JSON.stringify({ ...extra, temperature })
   }
 
-  return env;
+  return env
 }
 
 /** Map a known SDK assistant error code to a friendlier, actionable message. */
 function describeAssistantError(code: string): string {
   switch (code) {
-    case "authentication_failed":
-    case "oauth_org_not_allowed":
+    case 'authentication_failed':
+    case 'oauth_org_not_allowed':
       return (
-        "Authentication failed. Run `claude login` to sign in with your Claude " +
-        "subscription, or set ANTHROPIC_API_KEY and enable `allowApiKey` in " +
-        "your aicmd config."
-      );
-    case "billing_error":
-      return "Billing error from the Claude API. Check your plan or API credits.";
-    case "rate_limit":
-      return "Rate limited by the Claude API. Try again shortly.";
-    case "overloaded":
-      return "The Claude API is overloaded. Try again shortly.";
-    case "model_not_found":
-      return "The requested model was not found. Check the configured model name.";
-    case "max_output_tokens":
-      return "The model hit its output limit before finishing.";
+        'Authentication failed. Run `claude login` to sign in with your Claude ' +
+        'subscription, or set ANTHROPIC_API_KEY and enable `allowApiKey` in ' +
+        'your aicmd config.'
+      )
+    case 'billing_error':
+      return 'Billing error from the Claude API. Check your plan or API credits.'
+    case 'rate_limit':
+      return 'Rate limited by the Claude API. Try again shortly.'
+    case 'overloaded':
+      return 'The Claude API is overloaded. Try again shortly.'
+    case 'model_not_found':
+      return 'The requested model was not found. Check the configured model name.'
+    case 'max_output_tokens':
+      return 'The model hit its output limit before finishing.'
     default:
-      return `Model request failed (${code}).`;
+      return `Model request failed (${code}).`
   }
 }
 
@@ -171,8 +171,8 @@ export function buildQueryOptions(opts: RunPromptOptions, subprocessEnv?: Record
     ...(opts.abortController ? { abortController: opts.abortController } : {}),
     ...(opts.onStderr ? { stderr: opts.onStderr } : {}),
     ...(subprocessEnv ? { env: subprocessEnv } : {}),
-    ...(opts.outputFormat ? { outputFormat: opts.outputFormat } : {}),
-  };
+    ...(opts.outputFormat ? { outputFormat: opts.outputFormat } : {})
+  }
 }
 
 /**
@@ -184,61 +184,61 @@ export async function runPrompt(prompt: string, opts: RunPromptOptions): Promise
   const subprocessEnv = buildSubprocessEnv({
     baseEnv: process.env,
     allowApiKey: opts.allowApiKey ?? false,
-    ...(opts.temperature != null ? { temperature: opts.temperature } : {}),
-  });
-  const options = buildQueryOptions(opts, subprocessEnv);
+    ...(opts.temperature != null ? { temperature: opts.temperature } : {})
+  })
+  const options = buildQueryOptions(opts, subprocessEnv)
 
-  let resultText: string | null = null;
-  let costUsd = 0;
-  let model: string | undefined;
-  let structured: unknown;
-  let assistantError: string | undefined;
+  let resultText: string | null = null
+  let costUsd = 0
+  let model: string | undefined
+  let structured: unknown
+  let assistantError: string | undefined
 
   try {
-    const response = query({ prompt, options });
+    const response = query({ prompt, options })
     for await (const message of response as AsyncIterable<SDKMessage>) {
       switch (message.type) {
-        case "assistant": {
-          if (message.error) assistantError = message.error;
-          break;
+        case 'assistant': {
+          if (message.error) assistantError = message.error
+          break
         }
-        case "result": {
-          costUsd = message.total_cost_usd ?? 0;
+        case 'result': {
+          costUsd = message.total_cost_usd ?? 0
           // The served model is the (only) key of modelUsage, when present.
-          const usedModels = Object.keys(message.modelUsage ?? {});
-          if (usedModels.length > 0) model = usedModels[0];
-          if (message.subtype === "success") {
-            resultText = message.result;
-            structured = message.structured_output;
+          const usedModels = Object.keys(message.modelUsage ?? {})
+          if (usedModels.length > 0) model = usedModels[0]
+          if (message.subtype === 'success') {
+            resultText = message.result
+            structured = message.structured_output
           } else {
-            const detail = "errors" in message && message.errors.length ? message.errors.join("; ") : message.subtype;
-            throw new AicmdError(`Model run failed: ${detail}`);
+            const detail = 'errors' in message && message.errors.length ? message.errors.join('; ') : message.subtype
+            throw new AicmdError(`Model run failed: ${detail}`)
           }
-          break;
+          break
         }
         default:
-          break;
+          break
       }
     }
   } catch (err) {
-    if (err instanceof AicmdError) throw err;
+    if (err instanceof AicmdError) throw err
     if (opts.abortController?.signal.aborted) {
-      throw new AicmdError("Generation was cancelled.");
+      throw new AicmdError('Generation was cancelled.')
     }
-    throw new AicmdError(`Failed to call the Claude Agent SDK: ${(err as Error).message}`);
+    throw new AicmdError(`Failed to call the Claude Agent SDK: ${(err as Error).message}`)
   }
 
   if (assistantError) {
-    throw new AicmdError(describeAssistantError(assistantError));
+    throw new AicmdError(describeAssistantError(assistantError))
   }
   if (resultText === null) {
-    throw new AicmdError("The model returned no result.");
+    throw new AicmdError('The model returned no result.')
   }
 
   return {
     text: resultText.trim(),
     costUsd,
     ...(model ? { model } : {}),
-    ...(structured !== undefined ? { structured } : {}),
-  };
+    ...(structured !== undefined ? { structured } : {})
+  }
 }

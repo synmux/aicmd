@@ -57,7 +57,7 @@
     "build": "esbuild bin/aicmd.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/aicmd.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "format": "prettier --write .",
+    "format": "prettier --write . && biome format --write .",
     "typecheck": "tsc --noEmit",
     "prepack": "pnpm run build",
     "prepare": "skilld prepare || true"

@@ -13,9 +13,9 @@
  * when the array is nullish or too short.
  */
 export function itemAt<Item>(items: readonly Item[] | null | undefined, index: number): Item {
-  const item = items?.[index];
+  const item = items?.[index]
   if (item === undefined) {
-    throw new Error(`Expected an item at index ${index}, but the array has ${items?.length ?? "no"} item(s)`);
+    throw new Error(`Expected an item at index ${index}, but the array has ${items?.length ?? 'no'} item(s)`)
   }
-  return item;
+  return item
 }
