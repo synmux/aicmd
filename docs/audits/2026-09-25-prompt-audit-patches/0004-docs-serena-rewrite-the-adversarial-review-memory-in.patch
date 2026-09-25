@@ -1,0 +1,93 @@
+From 4537df04c08d48ef79c87f0d12d37c258859d6ac Mon Sep 17 00:00:00 2001
+From: syn <syn@syn.as>
+Date: Fri, 25 Sep 2026 01:37:16 +0100
+Subject: [PATCH 4/5] =?UTF-8?q?=F0=9F=93=9D=20docs(serena):=20rewrite=20th?=
+ =?UTF-8?q?e=20adversarial-review=20memory=20in=20the=20present=20tense?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The memory predates the Bun -> Node and OpenTUI -> Clack migrations and
+had rotted. Verified against the code on 2026-09-25, these claims were
+false:
+
+- 'fixed in commit aeac85b' - no such object in the repository
+- 'launcher ignores SIGINT around its spawnSync' - bin/aicmd.js imports
+  dist/ or the TS entry directly; there is no spawnSync
+- 'askLine resolves null on readline EOF/Ctrl-C' - askLine is gone
+  (Clack prompts)
+- 'engines node >=22.12' - now ^24.21.0
+- 'exports map exposes index.ts under the bun condition only' - exports
+  is only ./package.json
+- 'OpenTUI picker mouse-click can double-move' - OpenTUI is gone
+- 'user should git commit --amend -S --no-edit if still HEAD' - a stale
+  imperative about a commit that no longer exists
+
+Agents load this memory as context, so stale facts steer them wrong.
+The rewrite keeps the still-true hardening list (command hygiene, guard
+patterns, argument parsing, SIGINT) and points at AGENTS.md for the
+safety-routing invariants instead of restating them.
+---
+ .../memories/adversarial-review-2026-08-18.md | 50 ++++++++-----------
+ 1 file changed, 20 insertions(+), 30 deletions(-)
+
+diff --git a/.serena/memories/adversarial-review-2026-08-18.md b/.serena/memories/adversarial-review-2026-08-18.md
+index 96a9022..e719e22 100644
+--- a/.serena/memories/adversarial-review-2026-08-18.md
++++ b/.serena/memories/adversarial-review-2026-08-18.md
+@@ -1,32 +1,22 @@
+-# Adversarial review outcome (2026-08-18)
++# Hardening from the 2026-08-18 adversarial review
+ 
+-A 17-agent workflow (5 lens reviewers + adversarial verifiers) reviewed the
+-initial aicmd implementation. 8 confirmed findings + credible cap-dropped ones
+-were all fixed in commit `aeac85b`. Key hardening that future changes must not
+-regress:
++A multi-agent review of the first implementation produced these properties.
++Each is pinned by tests; keep them when refactoring.
+ 
+-- **Danger-signal provenance**: `GeneratedCommand.modelAssessed` /
+-  `DangerAssessment.modelSignalAvailable`. The plain-text fallback can't carry
+-  the model's danger verdict, so `-x` refuses unassessed commands without
+-  `-f` (`decideAction` in src/cli.ts — table-tested; a fail-open mutation
+-  here previously survived the whole suite).
+-- **`normaliseCommand`** (src/prompts.ts) rejects control chars / newlines on
+-  BOTH paths — display-vs-execution spoofing via `\r`/ESC.
+-- **Guard regexes**: rm rule covers `/bin/rm`, `sudo /bin/rm`, `\rm`;
+-  curl|sh matches multi-stage pipes; added find -delete, rsync --delete,
+-  truncate -s 0, crontab -r. Patterns carry human labels
+-  (DEFAULT_PATTERN_TABLE).
+-- **Commander**: `enablePositionalOptions().passThroughOptions()` — options
+-  only before the first task word ("quoting optional" promise).
+-- **SIGINT**: executeCommand detaches ALL process SIGINT listeners while the
+-  child runs (cli's two-stage force-quit would otherwise orphan it);
+-  launcher ignores SIGINT around its spawnSync; `askLine` resolves null on
+-  readline EOF/Ctrl-C (previously hung).
+-- **Packaging**: engines node >=22.12 (commander 15 floor), prepack builds
+-  dist, exports map exposes index.ts under the `bun` condition only, os
+-  darwin/linux, tsconfig `erasableSyntaxOnly`.
+-
+-Known accepted gaps: OpenTUI picker mouse-click can double-move (no public
+-`focusable` option; cosmetic). Final fix commit was unsigned (1Password
+-locked mid-session) — user should `git commit --amend -S --no-edit` if still
+-HEAD.
++- **Command hygiene**: `normaliseCommand` (src/prompts.ts) rejects control
++  characters and newlines on every candidate, so the confirmed text is always
++  the executed text (no `\r`/ESC display spoofing).
++- **Guard patterns** (`DEFAULT_PATTERN_TABLE` in src/safety.ts, each with a
++  human label): `rm` as a command token including `/bin/rm`, `sudo /bin/rm`
++  and `\rm`; `curl|sh` through multi-stage pipes; `find -delete`,
++  `rsync --delete`, `truncate -s 0`, `crontab -r`.
++- **Argument parsing**: Commander `enablePositionalOptions().passThroughOptions()`
++  (src/cli.ts) - options only before the first task word, so quoting the task
++  stays optional.
++- **SIGINT**: `executeCommand` (src/exec.ts) detaches every process SIGINT
++  listener while the child runs, so the CLI's two-stage force-quit cannot
++  orphan it.
++- **Safety routing**: the invariants live in AGENTS.md ("Safety behavior is
++  load-bearing"). `decideAction` (src/cli.ts) is a pure function with a
++  table test; keep that table exhaustive, because a fail-open mutation there
++  is invisible to every other test.
+-- 
+2.55.0
+

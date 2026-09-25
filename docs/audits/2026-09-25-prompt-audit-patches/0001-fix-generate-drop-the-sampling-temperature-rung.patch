@@ -1,0 +1,422 @@
+From 7a4af21fb51806111977513d0395b0080fba673e Mon Sep 17 00:00:00 2001
+From: syn <syn@syn.as>
+Date: Fri, 25 Sep 2026 01:25:11 +0100
+Subject: [PATCH 1/5] =?UTF-8?q?=F0=9F=94=A5=20fix(generate)!:=20drop=20the?=
+ =?UTF-8?q?=20sampling-temperature=20rung?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+interactiveTemperature was injected through CLAUDE_CODE_EXTRA_BODY as the
+first rung of the attempt ladder. Claude Code runs the model with thinking
+on, and the API then rejects every temperature except the default:
+
+  API Error: 400 `temperature` may only be set to 1 when thinking is
+  enabled or in adaptive mode
+
+(verified live against claude-sonnet-5, which the default `sonnet` alias
+serves). So the shipped default (1) was byte-for-byte the API default - a
+no-op - and any other value cost a failed round trip (~1.5 s) before the
+ladder silently retried without it. The 0..2 clamp also admitted values
+above the Messages API's 0..1 range.
+
+Variety between interactive candidates already comes from the prompt:
+buildUser asks for 'exactly N distinct command options - genuinely
+different approaches or tools', all returned by one structured call.
+
+- remove Config.interactiveTemperature, its default and sanitising
+- remove RunPromptOptions/SubprocessEnvOptions.temperature and the
+  CLAUDE_CODE_EXTRA_BODY merge in buildSubprocessEnv
+- the ladder is now structured -> plain text
+- tests: drop the temperature cases, pin that a user's own
+  CLAUDE_CODE_EXTRA_BODY passes through untouched, and that several
+  candidates come from one call
+- README, design spec (pipeline, config, testing, decisions log)
+
+BREAKING CHANGE: the interactiveTemperature config key is ignored (unknown
+keys already are), so existing config files keep loading.
+---
+ README.md                                     |  3 +-
+ .../specs/2026-08-18-aicmd-design.md          | 21 ++++++----
+ src/agent.ts                                  | 33 ++-------------
+ src/config.ts                                 |  6 ---
+ src/generate.ts                               | 22 ++++------
+ src/types.ts                                  |  6 ---
+ test/agent.test.ts                            | 41 +++----------------
+ test/config.test.ts                           |  8 ----
+ test/generate.test.ts                         | 29 ++-----------
+ 9 files changed, 36 insertions(+), 133 deletions(-)
+
+diff --git a/README.md b/README.md
+index ce11ed0..431e854 100644
+--- a/README.md
++++ b/README.md
+@@ -139,7 +139,7 @@ Ctrl-C and EOF at the prompt all count as No.
+ 
+ ## Interactive mode
+ 
+-`aicmd -i` generates several candidates (higher temperature for variety) and
++`aicmd -i` generates several distinct candidates (different approaches or tools) and
+ opens a picker that shows each command with its explanation: ↑/↓ or `j`/`k`
+ to move, ⏎ to run, `e` to edit first, `q`/Esc to cancel. Dangerous candidates
+ are marked `⚠` with the reason, and running one with ⏎ still goes through the
+@@ -171,7 +171,6 @@ All keys, with their defaults:
+   "shell": null,
+   "interactive": false,
+   "interactiveCount": 3,
+-  "interactiveTemperature": 1,
+   "spinner": "material",
+   "customPrompt": null,
+   "includeContext": true,
+diff --git a/docs/superpowers/specs/2026-08-18-aicmd-design.md b/docs/superpowers/specs/2026-08-18-aicmd-design.md
+index fc9ade5..885f213 100644
+--- a/docs/superpowers/specs/2026-08-18-aicmd-design.md
++++ b/docs/superpowers/specs/2026-08-18-aicmd-design.md
+@@ -101,10 +101,10 @@ Single model stage (unlike claude-commit's two): the task prompt is small.
+    }
+    ```
+ 
+-3. Attempt ladder (same pattern as claude-commit): structured + temperature
+-   (only when count > 1 and `interactiveTemperature` set) → structured →
+-   plain text with cleanup (`cleanCommand`: strip fences/quotes, first
+-   non-empty line). Whichever succeeds first wins.
++3. Attempt ladder (same pattern as claude-commit): structured → plain text
++   with cleanup (`cleanCommand`: strip fences/quotes, first non-empty line).
++   Whichever succeeds first wins. No sampling parameters are sent (see the
++   decisions log).
+ 4. Dedupe by command text; empty result → `AicmdError`.
+ 
+ The SDK call is fully isolated exactly like claude-commit (`tools: []`,
+@@ -229,7 +229,6 @@ Precedence (low → high), same machinery as claude-commit:
+   "shell": null,
+   "interactive": false,
+   "interactiveCount": 3,
+-  "interactiveTemperature": 1,
+   "spinner": "material",
+   "customPrompt": null,
+   "includeContext": true,
+@@ -241,7 +240,7 @@ Precedence (low → high), same machinery as claude-commit:
+ ```
+ 
+ `sanitizePartial` stays conservative: unknown keys and wrong types are
+-ignored, counts floored/min-clamped, temperature clamped 0..2, unknown
++ignored, counts floored/min-clamped, unknown
+ spinner names dropped, pattern arrays filtered to strings.
+ 
+ ## Error Boundaries
+@@ -262,7 +261,7 @@ overloaded, model-not-found, max-output) exactly as in claude-commit.
+ - `prompts.test.ts` — system prompt variants, schema extraction,
+   `cleanCommand` fence/quote/multi-line stripping.
+ - `generate.test.ts` — injectable runner: structured success, fallback
+-  ladder, temperature retry, dedupe, empty → error.
++  ladder, dedupe, empty → error.
+ - `cli.test.ts` — `resolveRunMode` matrix (execute/dry-run/TTY),
+   `decideAction` safety-routing matrix (dangerous × force × signal
+   provenance), `buildProgram` argv parsing (positional options, `--`,
+@@ -327,3 +326,11 @@ during generation on 2026-09-13.
+   so piped stderr stays plain text.
+ - **`ai` as a second bin name** — matches the fish function it replaces;
+   users who fear collisions simply don't use it.
++- **No sampling parameters (2026-09-25)** — `interactiveTemperature` and its
++  `CLAUDE_CODE_EXTRA_BODY` injection are gone. Claude Code runs the model with
++  thinking on, and the API then rejects every temperature except the default
++  1 (verified live against `claude-sonnet-5`: "`temperature` may only be set
++  to 1 when thinking is enabled or in adaptive mode"). The setting was a no-op
++  at its default and a failed round trip at any other value. Variety between
++  interactive candidates comes from the prompt, which asks for genuinely
++  different approaches.
+diff --git a/src/agent.ts b/src/agent.ts
+index cdca3f7..a21bd5f 100644
+--- a/src/agent.ts
++++ b/src/agent.ts
+@@ -27,13 +27,6 @@ export interface RunPromptOptions {
+   abortController?: AbortController
+   /** Receives the underlying CLI's stderr (for `--verbose`). */
+   onStderr?: (data: string) => void
+-  /**
+-   * Sampling temperature. Passed to the model via `CLAUDE_CODE_EXTRA_BODY`.
+-   * Used to add variety when generating several interactive options. Models
+-   * that don't accept a temperature override will reject the request, so the
+-   * caller should be prepared to retry without it.
+-   */
+-  temperature?: number
+   /**
+    * Request a structured JSON response matching this schema. The parsed
+    * object is returned on {@link ModelResult.structured}. Models that don't
+@@ -73,8 +66,6 @@ export interface SubprocessEnvOptions {
+    * Defaults to false so the gate fails safe when a caller omits it.
+    */
+   allowApiKey?: boolean
+-  /** Sampling temperature to inject via `CLAUDE_CODE_EXTRA_BODY`, preserving any existing extra body. */
+-  temperature?: number
+ }
+ 
+ /**
+@@ -87,29 +78,12 @@ export interface SubprocessEnvOptions {
+  * billing to pay-as-you-go.
+  */
+ export function buildSubprocessEnv(opts: SubprocessEnvOptions): Record<string, string | undefined> | undefined {
+-  const { baseEnv, allowApiKey = false, temperature } = opts
++  const { baseEnv, allowApiKey = false } = opts
+   const stripped = allowApiKey ? [] : presentCredentialVars(baseEnv)
+-  if (stripped.length === 0 && temperature == null) return undefined
++  if (stripped.length === 0) return undefined
+ 
+   const env = { ...baseEnv }
+   for (const name of stripped) delete env[name]
+-
+-  if (temperature != null) {
+-    let extra: Record<string, unknown> = {}
+-    const existing = baseEnv.CLAUDE_CODE_EXTRA_BODY
+-    if (existing) {
+-      try {
+-        const parsed: unknown = JSON.parse(existing)
+-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+-          extra = parsed as Record<string, unknown>
+-        }
+-      } catch {
+-        /* ignore a malformed existing value */
+-      }
+-    }
+-    env.CLAUDE_CODE_EXTRA_BODY = JSON.stringify({ ...extra, temperature })
+-  }
+-
+   return env
+ }
+ 
+@@ -183,8 +157,7 @@ export function buildQueryOptions(opts: RunPromptOptions, subprocessEnv?: Record
+ export async function runPrompt(prompt: string, opts: RunPromptOptions): Promise<ModelResult> {
+   const subprocessEnv = buildSubprocessEnv({
+     baseEnv: process.env,
+-    allowApiKey: opts.allowApiKey ?? false,
+-    ...(opts.temperature != null ? { temperature: opts.temperature } : {})
++    allowApiKey: opts.allowApiKey ?? false
+   })
+   const options = buildQueryOptions(opts, subprocessEnv)
+ 
+diff --git a/src/config.ts b/src/config.ts
+index 2a87a7b..28d5006 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -23,7 +23,6 @@ export const DEFAULT_CONFIG: Config = {
+   shell: null,
+   interactive: false,
+   interactiveCount: 3,
+-  interactiveTemperature: 1,
+   spinner: DEFAULT_SPINNER,
+   customPrompt: null,
+   includeContext: true,
+@@ -133,11 +132,6 @@ export function sanitizePartial(raw: unknown): PartialConfig {
+   if (typeof obj.interactiveCount === 'number' && Number.isFinite(obj.interactiveCount)) {
+     out.interactiveCount = Math.max(1, Math.floor(obj.interactiveCount))
+   }
+-  if (obj.interactiveTemperature === null) {
+-    out.interactiveTemperature = null
+-  } else if (typeof obj.interactiveTemperature === 'number' && Number.isFinite(obj.interactiveTemperature)) {
+-    out.interactiveTemperature = Math.min(2, Math.max(0, obj.interactiveTemperature))
+-  }
+   if (typeof obj.spinner === 'string' && isSpinnerName(obj.spinner)) {
+     out.spinner = obj.spinner
+   }
+diff --git a/src/generate.ts b/src/generate.ts
+index 7a1166e..f7b90e0 100644
+--- a/src/generate.ts
++++ b/src/generate.ts
+@@ -4,13 +4,15 @@
+  *
+  * Attempts, in order (whichever succeeds first wins):
+  *
+- * 1. Structured output with a temperature bump - only when several candidates
+- *    are requested and `interactiveTemperature` is set, for variety.
+- * 2. Structured output without the temperature (for models that reject a
+- *    temperature override).
+- * 3. Plain text with delimiter parsing and cleanup (for models that don't
++ * 1. Structured output against the commands schema.
++ * 2. Plain text with delimiter parsing and cleanup (for models that don't
+  *    support structured output at all). This path loses the explanation and
+  *    the model's danger flag; the local guard patterns still apply.
++ *
++ * No attempt sets sampling parameters. Claude Code runs the model with
++ * thinking on, and the API then rejects any temperature but the default, so
++ * variety between interactive candidates comes from the prompt instead
++ * (`buildUser` asks for genuinely different approaches).
+  */
+ import { runPrompt } from './agent.ts'
+ import { resolveShell } from './context.ts'
+@@ -74,12 +76,7 @@ export async function generateCommands(
+     ...(abortController ? { abortController } : {}),
+     ...(onStderr ? { onStderr } : {})
+   }
+-  const temperature = count > 1 && config.interactiveTemperature != null ? config.interactiveTemperature : undefined
+-
+-  const attempts: Array<{ structured: boolean; temperature?: number }> = []
+-  if (temperature != null) attempts.push({ structured: true, temperature })
+-  attempts.push({ structured: true })
+-  attempts.push({ structured: false })
++  const attempts: Array<{ structured: boolean }> = [{ structured: true }, { structured: false }]
+ 
+   let candidates: GeneratedCommand[] | null = null
+   let costUsd = 0
+@@ -104,8 +101,7 @@ export async function generateCommands(
+                 schema: COMMANDS_SCHEMA
+               }
+             }
+-          : {}),
+-        ...(attempt.temperature != null ? { temperature: attempt.temperature } : {})
++          : {})
+       })
+       costUsd += result.costUsd
+       if (result.model !== undefined) model = result.model
+diff --git a/src/types.ts b/src/types.ts
+index 4fe0fe2..2773f31 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -20,12 +20,6 @@ export interface Config {
+   interactive: boolean
+   /** How many candidate commands to generate in interactive mode. */
+   interactiveCount: number
+-  /**
+-   * Sampling temperature for the model when generating interactive options,
+-   * to encourage variety between candidates. `null` leaves the model at its
+-   * default. Only applied when more than one candidate is requested.
+-   */
+-  interactiveTemperature: number | null
+   /**
+    * Name of the progress spinner animation: any spinner from the cli-spinners
+    * set bundled with ora (e.g. `"dots"`, `"moon"`, `"material"`). Unknown
+diff --git a/test/agent.test.ts b/test/agent.test.ts
+index 95cc012..ba79edc 100644
+--- a/test/agent.test.ts
++++ b/test/agent.test.ts
+@@ -66,51 +66,20 @@ describe('buildSubprocessEnv', () => {
+     expect(Object.keys(env)).not.toContain('ANTHROPIC_API_KEY')
+   })
+ 
+-  test('injects the temperature via CLAUDE_CODE_EXTRA_BODY', () => {
++  test("passes the user's own CLAUDE_CODE_EXTRA_BODY through untouched", () => {
+     const env = expectDefined(
+       buildSubprocessEnv({
+-        baseEnv: cleanEnv,
+-        allowApiKey: false,
+-        temperature: 0.8
++        baseEnv: { ...cleanEnv, ANTHROPIC_API_KEY: 'sk-test', CLAUDE_CODE_EXTRA_BODY: '{"foo":1}' },
++        allowApiKey: false
+       })
+     )
+-    expect(JSON.parse(expectDefined(env.CLAUDE_CODE_EXTRA_BODY))).toEqual({
+-      temperature: 0.8
+-    })
+-  })
+-
+-  test('merges the temperature over an existing extra body', () => {
+-    const env = expectDefined(
+-      buildSubprocessEnv({
+-        baseEnv: { ...cleanEnv, CLAUDE_CODE_EXTRA_BODY: '{"foo":1}' },
+-        allowApiKey: false,
+-        temperature: 0.5
+-      })
+-    )
+-    expect(JSON.parse(expectDefined(env.CLAUDE_CODE_EXTRA_BODY))).toEqual({
+-      foo: 1,
+-      temperature: 0.5
+-    })
+-  })
+-
+-  test('ignores a malformed existing extra body', () => {
+-    const env = expectDefined(
+-      buildSubprocessEnv({
+-        baseEnv: { ...cleanEnv, CLAUDE_CODE_EXTRA_BODY: '{oops' },
+-        allowApiKey: false,
+-        temperature: 0.5
+-      })
+-    )
+-    expect(JSON.parse(expectDefined(env.CLAUDE_CODE_EXTRA_BODY))).toEqual({
+-      temperature: 0.5
+-    })
++    expect(env.CLAUDE_CODE_EXTRA_BODY).toBe('{"foo":1}')
+   })
+ 
+   test('does not mutate the base environment', () => {
+     const baseEnv = { ...cleanEnv, ANTHROPIC_API_KEY: 'sk-test' }
+-    buildSubprocessEnv({ baseEnv, allowApiKey: false, temperature: 0.5 })
++    buildSubprocessEnv({ baseEnv, allowApiKey: false })
+     expect(baseEnv.ANTHROPIC_API_KEY).toBe('sk-test')
+-    expect(Object.keys(baseEnv)).not.toContain('CLAUDE_CODE_EXTRA_BODY')
+   })
+ })
+ 
+diff --git a/test/config.test.ts b/test/config.test.ts
+index 3b12b02..41aeb0e 100644
+--- a/test/config.test.ts
++++ b/test/config.test.ts
+@@ -44,14 +44,6 @@ describe('sanitizePartial', () => {
+     expect(sanitizePartial({ customPrompt: 'be terse' }).customPrompt).toBe('be terse')
+   })
+ 
+-  test('interactiveTemperature accepts null, clamps to 0..2, ignores bad types', () => {
+-    expect(sanitizePartial({ interactiveTemperature: null }).interactiveTemperature).toBeNull()
+-    expect(sanitizePartial({ interactiveTemperature: 0.7 }).interactiveTemperature).toBe(0.7)
+-    expect(sanitizePartial({ interactiveTemperature: 9 }).interactiveTemperature).toBe(2)
+-    expect(sanitizePartial({ interactiveTemperature: -3 }).interactiveTemperature).toBe(0)
+-    expect(sanitizePartial({ interactiveTemperature: 'hot' }).interactiveTemperature).toBeUndefined()
+-  })
+-
+   test('dangerousPatterns accepts null or a string array, filtering non-strings', () => {
+     expect(sanitizePartial({ dangerousPatterns: null }).dangerousPatterns).toBeNull()
+     expect(sanitizePartial({ dangerousPatterns: ['*rm *', 7, 're:x'] }).dangerousPatterns).toEqual(['*rm *', 're:x'])
+diff --git a/test/generate.test.ts b/test/generate.test.ts
+index d3aa00b..7c7b7b2 100644
+--- a/test/generate.test.ts
++++ b/test/generate.test.ts
+@@ -105,17 +105,9 @@ describe('generateCommands', () => {
+     expect(calls).toHaveLength(2)
+   })
+ 
+-  test('count > 1 with a temperature tries temperature first, then retries without', async () => {
++  test('several candidates come from one structured call', async () => {
+     const { runner, calls } = scriptedRunner([
+-      new Error('temperature not supported'),
+-      structuredResult([
+-        candidate,
+-        {
+-          command: 'find . -maxdepth 1',
+-          explanation: 'finds',
+-          dangerous: false
+-        }
+-      ])
++      structuredResult([candidate, { command: 'find . -maxdepth 1', explanation: 'finds', dangerous: false }])
+     ])
+     const result = await generateCommands('list files', config, {
+       runner,
+@@ -123,26 +115,13 @@ describe('generateCommands', () => {
+       shellPath: '/bin/sh'
+     })
+     expect(result.candidates).toHaveLength(2)
+-    const expectedTemperature = config.interactiveTemperature
+-    if (expectedTemperature === null) throw new Error('DEFAULT_CONFIG.interactiveTemperature must be set')
+-    expect(itemAt(calls, 0).opts.temperature).toBe(expectedTemperature)
+-    expect(itemAt(calls, 1).opts.temperature).toBeUndefined()
+-  })
+-
+-  test('no temperature attempt when interactiveTemperature is null', async () => {
+-    const { runner, calls } = scriptedRunner([structuredResult([candidate])])
+-    await generateCommands(
+-      'list files',
+-      { ...config, interactiveTemperature: null },
+-      { runner, count: 3, shellPath: '/bin/sh' }
+-    )
+-    expect(itemAt(calls, 0).opts.temperature).toBeUndefined()
++    expect(calls).toHaveLength(1)
++    expect(itemAt(calls, 0).prompt).toContain('2 distinct command options')
+   })
+ 
+   test('plain multi-candidate fallback splits on the delimiter', async () => {
+     const { runner } = scriptedRunner([
+       new Error('no structured'),
+-      new Error('still no structured'),
+       { text: `ls\n${OPTION_DELIMITER}\ndu -sh *`, costUsd: 0 }
+     ])
+     const result = await generateCommands('list', config, {
+-- 
+2.55.0
+

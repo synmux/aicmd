@@ -1,0 +1,1041 @@
+From 9490976cfaf654e8bed740b0259619c0b6932319 Mon Sep 17 00:00:00 2001
+From: syn <syn@syn.as>
+Date: Fri, 25 Sep 2026 01:35:23 +0100
+Subject: [PATCH 3/5] =?UTF-8?q?=F0=9F=94=A5=20refactor(generate)!:=20remov?=
+ =?UTF-8?q?e=20the=20plain-text=20fallback=20rung?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The attempt ladder ended in a plain-text rung 'for models that reject
+structured output': an 'Output ONLY the command itself ... no markdown,
+no code fences, no quotes, no preamble, no explanation' prompt variant,
+an ===OPTION=== delimiter protocol, cleanCommand's fence/quote regex
+cleanup, and a parallel safety path for the unassessed candidates it
+produced (modelAssessed, modelSignalAvailable, decideAction's
+refuse-unassessed, and three degraded-signal notes).
+
+That is the JSON-forcing stack structured outputs replace, and its
+stated trigger no longer exists: the Agent SDK delivers outputFormat
+through an end-turn tool call, which every tool-capable Claude model
+supports (verified live on claude-sonnet-5). The rung therefore only
+ever caught failures of the structured call - auth, overload,
+error_max_turns, or a structured reply whose commands normaliseCommand
+had rejected - and answered them with a command carrying no model
+danger verdict. Worse, cleanCommand kept the first non-empty line of a
+multi-line reply, so a structured command rejected precisely because it
+spanned lines could come back truncated: the opposite of
+normaliseCommand's reject-don't-truncate rule.
+
+The model-facing prompts are byte-for-byte unchanged on the structured
+path (checked mechanically). A failed or unusable response is now an
+AicmdError, one call and no hidden retry.
+
+- generate: one structured call; no ladder, no cost summing
+- prompts: drop OPTION_DELIMITER, the structured flag, the plain
+  prompt variants, cleanCommand and plainToCandidates
+- types/safety/cli/interactive: drop modelAssessed,
+  modelSignalAvailable, refuse-unassessed and the degraded notes
+- index: stop re-exporting the removed helpers
+- tests: replace fallback cases with 'errors surface, exactly one call'
+- AGENTS.md invariant, README, design spec (pipeline, safety model,
+  testing, decisions log)
+
+BREAKING CHANGE: cleanCommand, plainToCandidates, OPTION_DELIMITER,
+buildUser's third parameter, SystemPromptOptions.structured,
+GeneratedCommand.modelAssessed, DangerAssessment.modelSignalAvailable
+and the 'refuse-unassessed' PlainAction are gone from the library
+surface; a generation failure is an error instead of a degraded command.
+---
+ AGENTS.md                                     |  14 +--
+ README.md                                     |   5 -
+ .../specs/2026-08-18-aicmd-design.md          |  36 ++++---
+ index.ts                                      |   3 -
+ src/agent.ts                                  |   6 +-
+ src/cli.ts                                    |  44 +-------
+ src/generate.ts                               |  86 ++++-----------
+ src/prompts.ts                                | 101 +++---------------
+ src/safety.ts                                 |   3 +-
+ src/types.ts                                  |  13 ---
+ src/ui/interactive.ts                         |   9 --
+ test/cli.test.ts                              |  12 +--
+ test/generate.test.ts                         |  96 ++++-------------
+ test/interactive.test.ts                      |   4 +-
+ test/prompts.test.ts                          |  96 ++---------------
+ test/safety.test.ts                           |  19 ----
+ 16 files changed, 102 insertions(+), 445 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index b5c0165..a98a152 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -12,9 +12,9 @@ bin/aicmd.js           # runtime launcher (plain JS): dist under node ▸ node T
+ bin/aicmd.ts           # thin entry calling run()
+ index.ts               # library re-exports
+ src/cli.ts             # Commander program, run-mode resolution, flows
+-src/generate.ts        # structured-first attempt ladder
++src/generate.ts        # one isolated structured model call → deduped candidates
+ src/agent.ts           # isolated single-turn Agent SDK wrapper
+-src/prompts.ts         # schema + prompt builders + plain-text cleanup
++src/prompts.ts         # schema + prompt builders + candidate extraction
+ src/safety.ts          # guard patterns (globs + re:) + model-flag combination
+ src/exec.ts            # shell -c execution, exit-code/signal mapping
+ src/config.ts          # XDG global / package.json / rc-file discovery
+@@ -53,11 +53,11 @@ test/terminal.ts       # fake terminal: drives real prompts through PassThrough/
+   without `-f`, confirmation defaults to No (Enter, Escape, Ctrl-C and EOF
+   all mean No), and only the command itself may ever be written to stdout
+   (all chrome goes to stderr, so pipes compose). Two further invariants:
+-  candidates without a real model danger assessment (`modelAssessed`
+-  false — the plain-text fallback) must never auto-execute under `-x`
+-  without `-f` (`decideAction` in src/cli.ts pins this), and every candidate
+-  passes `normaliseCommand` (src/prompts.ts) so control characters or
+-  newlines can never make the confirmed text differ from the executed text.
++  every candidate comes from structured output, so it always carries the
++  model's own danger assessment (a failed or unusable response is an error,
++  never a degraded, unassessed command), and every candidate passes
++  `normaliseCommand` (src/prompts.ts) so control characters or newlines can
++  never make the confirmed text differ from the executed text.
+ 
+ ## Commands
+ 
+diff --git a/README.md b/README.md
+index 431e854..71fb045 100644
+--- a/README.md
++++ b/README.md
+@@ -126,11 +126,6 @@ What happens then depends on the mode:
+ | `-x -f`       | runs immediately  | loud warning, runs anyway                |
+ | `-d` / no TTY | printed to stdout | printed to stdout, warning on stderr     |
+ 
+-On the rare setups where structured output is unavailable, generation falls
+-back to plain text and the model's danger signal is lost. That degradation is
+-never silent: every mode prints a note, and `-x` **refuses to auto-execute**
+-on the pattern list alone (`-f` remains the escape hatch).
+-
+ The confirmation is answered with a single keypress and its default is
+ **No** — running a generated command takes a deliberate `y`. `e` opens the
+ command in your `$EDITOR` (`GIT_EDITOR` ▸ `VISUAL` ▸ `EDITOR` ▸ `vi`) and then
+diff --git a/docs/superpowers/specs/2026-08-18-aicmd-design.md b/docs/superpowers/specs/2026-08-18-aicmd-design.md
+index 885f213..f76e945 100644
+--- a/docs/superpowers/specs/2026-08-18-aicmd-design.md
++++ b/docs/superpowers/specs/2026-08-18-aicmd-design.md
+@@ -101,10 +101,9 @@ Single model stage (unlike claude-commit's two): the task prompt is small.
+    }
+    ```
+ 
+-3. Attempt ladder (same pattern as claude-commit): structured → plain text
+-   with cleanup (`cleanCommand`: strip fences/quotes, first non-empty line).
+-   Whichever succeeds first wins. No sampling parameters are sent (see the
+-   decisions log).
++3. One structured call, no fallback: a failed call or an unusable response
++   is an `AicmdError`. No sampling parameters are sent (see the decisions
++   log).
+ 4. Dedupe by command text; empty result → `AicmdError`.
+ 
+ The SDK call is fully isolated exactly like claude-commit (`tools: []`,
+@@ -128,10 +127,9 @@ Two independent signals, OR-ed together:
+ 2. **Model self-assessment** — the `dangerous` boolean + `dangerReason` from
+    structured output. Free coverage for everything a pattern list misses.
+ 
+-Signal provenance is tracked: candidates carry `modelAssessed`, and the
+-plain-text fallback (which cannot carry the model's verdict) marks them
+-unassessed. A degraded verdict is never silent — every mode prints a note,
+-and `-x` refuses to auto-execute on the pattern list alone unless `-f`.
++Both signals are always present: every candidate comes from structured
++output, so there is no degraded, pattern-only verdict (see the decisions
++log).
+ 
+ Command hygiene: candidates containing control characters or literal
+ newlines are rejected (`normaliseCommand`) rather than displayed, so the
+@@ -258,13 +256,12 @@ overloaded, model-not-found, max-output) exactly as in claude-commit.
+   `re:` patterns, replace-vs-extend config semantics, model-flag OR.
+ - `config.test.ts` — sanitization, precedence including XDG global dir,
+   package.json key, walk-up discovery, explicit path errors.
+-- `prompts.test.ts` — system prompt variants, schema extraction,
+-  `cleanCommand` fence/quote/multi-line stripping.
+-- `generate.test.ts` — injectable runner: structured success, fallback
+-  ladder, dedupe, empty → error.
++- `prompts.test.ts` — system prompt variants, schema extraction and
++  command normalisation.
++- `generate.test.ts` — injectable runner: structured success, exactly one
++  call, dedupe, failed/unusable → error.
+ - `cli.test.ts` — `resolveRunMode` matrix (execute/dry-run/TTY),
+-  `decideAction` safety-routing matrix (dangerous × force × signal
+-  provenance), `buildProgram` argv parsing (positional options, `--`,
++  `decideAction` safety-routing matrix (dangerous × force), `buildProgram` argv parsing (positional options, `--`,
+   count validation), `flagsToConfig` mapping.
+ - `context.test.ts` — context block for given platform/shell/env.
+ - `exec.test.ts` — real `/bin/sh` runs: exit-code and signal mapping, and
+@@ -334,3 +331,14 @@ during generation on 2026-09-13.
+   at its default and a failed round trip at any other value. Variety between
+   interactive candidates comes from the prompt, which asks for genuinely
+   different approaches.
++- **No plain-text fallback (2026-09-25)** — the attempt ladder ended in a
++  plain-text rung "for models that reject structured output", with regex
++  cleanup (`cleanCommand`), a delimiter protocol and an unassessed-signal
++  safety path. The Agent SDK delivers structured output through an end-turn
++  tool call, which every tool-capable Claude model supports, so the rung only
++  ever caught failures of the structured call - and answered them with a
++  command carrying no model danger verdict, truncated to its first line when
++  the reply spanned several (the opposite of `normaliseCommand`'s
++  reject-don't-truncate rule). A failed or unusable response is now an
++  error; `modelAssessed`, `refuse-unassessed` and the degraded-signal notes
++  went with the rung.
+diff --git a/index.ts b/index.ts
+index fdf75b5..bf4351c 100644
+--- a/index.ts
++++ b/index.ts
+@@ -54,11 +54,8 @@ export {
+   buildSystem,
+   buildUser,
+   COMMANDS_SCHEMA,
+-  cleanCommand,
+   extractCandidates,
+   normaliseCommand,
+-  OPTION_DELIMITER,
+-  plainToCandidates,
+   type SystemPromptOptions
+ } from './src/prompts.ts'
+ export {
+diff --git a/src/agent.ts b/src/agent.ts
+index a21bd5f..32ecb3d 100644
+--- a/src/agent.ts
++++ b/src/agent.ts
+@@ -29,9 +29,9 @@ export interface RunPromptOptions {
+   onStderr?: (data: string) => void
+   /**
+    * Request a structured JSON response matching this schema. The parsed
+-   * object is returned on {@link ModelResult.structured}. Models that don't
+-   * support structured outputs will reject the request, so the caller should
+-   * be prepared to retry without it.
++   * object is returned on {@link ModelResult.structured}. The Agent SDK
++   * delivers it through an end-turn tool call, so every tool-capable model
++   * supports it.
+    */
+   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> }
+   /**
+diff --git a/src/cli.ts b/src/cli.ts
+index 0aba34f..1ed445b 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -10,7 +10,7 @@ import { AicmdError } from './errors.ts'
+ import { executeCommand } from './exec.ts'
+ import { generateCommands } from './generate.ts'
+ import { assessDanger, effectivePatterns } from './safety.ts'
+-import type { Config, DangerAssessment, PartialConfig } from './types.ts'
++import type { Config, PartialConfig } from './types.ts'
+ import {
+   printCancelled,
+   printCommandBlock,
+@@ -154,21 +154,14 @@ export function resolveRunMode(args: {
+ }
+ 
+ /** What to do with the generated command once its danger verdict is known. */
+-export type PlainAction = 'refuse-dangerous' | 'refuse-unassessed' | 'run' | 'print' | 'confirm'
++export type PlainAction = 'refuse-dangerous' | 'run' | 'print' | 'confirm'
+ 
+ /**
+  * The safety-routing decision for the non-interactive flows, extracted as a
+  * pure function so the matrix is testable: `--execute` refuses dangerous
+- * commands without `--force`, and also refuses when the model's own danger
+- * self-assessment was unavailable (the plain-text fallback) - a defaulted
+- * "not dangerous" must never auto-execute on the pattern list alone.
++ * commands without `--force`.
+  */
+-export function decideAction(args: {
+-  mode: RunMode
+-  force: boolean
+-  dangerous: boolean
+-  modelSignalAvailable: boolean
+-}): PlainAction {
++export function decideAction(args: { mode: RunMode; force: boolean; dangerous: boolean }): PlainAction {
+   switch (args.mode) {
+     case 'dry-run':
+     case 'print':
+@@ -177,7 +170,6 @@ export function decideAction(args: {
+       return 'confirm'
+     case 'execute':
+       if (args.dangerous) return args.force ? 'run' : 'refuse-dangerous'
+-      if (!args.modelSignalAvailable && !args.force) return 'refuse-unassessed'
+       return 'run'
+     default:
+       throw new AicmdError(`Unhandled run mode: ${args.mode}`)
+@@ -320,8 +312,7 @@ async function runPlain(task: string, config: Config, flow: FlowOptions): Promis
+   const action = decideAction({
+     mode: flow.mode,
+     force: flow.force,
+-    dangerous: danger.dangerous,
+-    modelSignalAvailable: danger.modelSignalAvailable
++    dangerous: danger.dangerous
+   })
+ 
+   switch (action) {
+@@ -329,7 +320,6 @@ async function runPlain(task: string, config: Config, flow: FlowOptions): Promis
+       // Only the command goes to stdout so the output can be piped; all
+       // chrome (warnings, notes, the explanation) stays on stderr.
+       if (danger.dangerous) printDangerWarning(danger)
+-      printDegradedSignalNote(danger)
+       if (flow.mode === 'print') {
+         printMuted('No interactive terminal: printing instead of running.')
+       }
+@@ -346,21 +336,11 @@ async function runPlain(task: string, config: Config, flow: FlowOptions): Promis
+       printCancelled(RERUN_HINT)
+       return 1
+     }
+-    case 'refuse-unassessed': {
+-      printRefusal([
+-        "SAFETY: refusing to auto-execute: the model's danger self-assessment was",
+-        'unavailable (plain-text fallback), so only the local guard patterns were checked.'
+-      ])
+-      printCommandBlock(candidate.command)
+-      printCancelled(RERUN_HINT)
+-      return 1
+-    }
+     case 'run': {
+       if (danger.dangerous) {
+         printWarning(['FORCE MODE: executing despite the danger flags.'])
+         printDangerWarning(danger)
+       }
+-      printDegradedSignalNote(danger)
+       if (config.showExplanation && candidate.explanation !== '') {
+         printMuted(candidate.explanation)
+       }
+@@ -372,7 +352,6 @@ async function runPlain(task: string, config: Config, flow: FlowOptions): Promis
+         printMuted(candidate.explanation)
+       }
+       if (danger.dangerous) printDangerWarning(danger)
+-      printDegradedSignalNote(danger)
+ 
+       const choice = await confirmRun()
+       if (choice === 'no') {
+@@ -398,19 +377,6 @@ async function runPlain(task: string, config: Config, flow: FlowOptions): Promis
+   }
+ }
+ 
+-/**
+- * One dim stderr line whenever a verdict lacked the model's own assessment,
+- * so a silently degraded environment (structured output unavailable) is
+- * always visible - not just under `-v`.
+- */
+-function printDegradedSignalNote(danger: DangerAssessment): void {
+-  if (danger.modelSignalAvailable) return
+-  printMuted(
+-    "Note: the model's danger self-assessment was unavailable " +
+-      '(plain-text fallback); only local guard patterns were applied.'
+-  )
+-}
+-
+ const RERUN_HINT = 'Re-run with --force (-f) to execute anyway, or without --execute (-x) for a confirmation prompt.'
+ 
+ /** Announce and execute the final command, returning its exit code. */
+diff --git a/src/generate.ts b/src/generate.ts
+index f7b90e0..1348271 100644
+--- a/src/generate.ts
++++ b/src/generate.ts
+@@ -1,23 +1,20 @@
+ /**
+- * The command-generation pipeline: one isolated model call with a
+- * structured-first attempt ladder.
++ * The command-generation pipeline: one isolated, structured model call.
+  *
+- * Attempts, in order (whichever succeeds first wins):
++ * There is no fallback path. The Agent SDK delivers structured output
++ * through an end-turn tool call, which every tool-capable Claude model
++ * supports, so a failed or unusable response is an error - never a degraded
++ * command without the model's danger assessment.
+  *
+- * 1. Structured output against the commands schema.
+- * 2. Plain text with delimiter parsing and cleanup (for models that don't
+- *    support structured output at all). This path loses the explanation and
+- *    the model's danger flag; the local guard patterns still apply.
+- *
+- * No attempt sets sampling parameters. Claude Code runs the model with
+- * thinking on, and the API then rejects any temperature but the default, so
+- * variety between interactive candidates comes from the prompt instead
+- * (`buildUser` asks for genuinely different approaches).
++ * No sampling parameters are set. Claude Code runs the model with thinking
++ * on, and the API then rejects any temperature but the default, so variety
++ * between interactive candidates comes from the prompt instead (`buildUser`
++ * asks for genuinely different approaches).
+  */
+ import { runPrompt } from './agent.ts'
+ import { resolveShell } from './context.ts'
+ import { AicmdError } from './errors.ts'
+-import { buildSystem, buildUser, COMMANDS_SCHEMA, extractCandidates, plainToCandidates } from './prompts.ts'
++import { buildSystem, buildUser, COMMANDS_SCHEMA, extractCandidates } from './prompts.ts'
+ import type { Config, GeneratedCommand } from './types.ts'
+ 
+ export interface GenerateProgress {
+@@ -37,8 +34,8 @@ export interface GenerateOptions {
+   /** Receives the SDK subprocess's stderr (wired by `--verbose`). */
+   onStderr?: (data: string) => void
+   /**
+-   * Model runner used for every prompt; injectable so tests can exercise the
+-   * attempt ladder without real model calls. Defaults to {@link runPrompt}.
++   * Model runner; injectable so tests can exercise the pipeline without real
++   * model calls. Defaults to {@link runPrompt}.
+    */
+   runner?: typeof runPrompt
+ }
+@@ -46,9 +43,9 @@ export interface GenerateOptions {
+ export interface GenerateResult {
+   /** Candidate commands (length 1 outside interactive mode). */
+   candidates: GeneratedCommand[]
+-  /** Total cost across all attempts, in USD. */
++  /** Cost of the model call, in USD. */
+   costUsd: number
+-  /** The model that served the successful attempt, if reported. */
++  /** The model that served the call, if reported. */
+   model?: string
+ }
+ 
+@@ -70,61 +67,24 @@ export async function generateCommands(
+ 
+   progress.onPhase?.(count > 1 ? `Generating ${count} command options` : 'Generating command')
+ 
+-  const baseOpts = {
++  const result = await runner(buildUser(task, count), {
+     model: config.model,
+     allowApiKey: config.allowApiKey,
++    system: buildSystem({ shellPath, contextBlock, customPrompt: config.customPrompt, count }),
++    outputFormat: { type: 'json_schema', schema: COMMANDS_SCHEMA },
+     ...(abortController ? { abortController } : {}),
+     ...(onStderr ? { onStderr } : {})
+-  }
+-  const attempts: Array<{ structured: boolean }> = [{ structured: true }, { structured: false }]
++  })
+ 
+-  let candidates: GeneratedCommand[] | null = null
+-  let costUsd = 0
+-  let model: string | undefined
+-  let lastError: unknown
+-
+-  for (const attempt of attempts) {
+-    try {
+-      const result = await runner(buildUser(task, count, attempt.structured), {
+-        ...baseOpts,
+-        system: buildSystem({
+-          shellPath,
+-          contextBlock,
+-          customPrompt: config.customPrompt,
+-          count,
+-          structured: attempt.structured
+-        }),
+-        ...(attempt.structured
+-          ? {
+-              outputFormat: {
+-                type: 'json_schema' as const,
+-                schema: COMMANDS_SCHEMA
+-              }
+-            }
+-          : {})
+-      })
+-      costUsd += result.costUsd
+-      if (result.model !== undefined) model = result.model
+-      candidates = attempt.structured ? extractCandidates(result.structured) : plainToCandidates(result.text, count)
+-      if (candidates && candidates.length > 0) break
+-    } catch (err) {
+-      lastError = err
+-      // If the run was cancelled, stop retrying: the shared abort signal
+-      // would make every remaining attempt fail immediately in the same way.
+-      if (abortController?.signal.aborted) break
+-    }
+-  }
+-
+-  const deduped = dedupeByCommand(candidates ?? [])
+-  if (deduped.length === 0) {
+-    if (lastError instanceof AicmdError) throw lastError
++  const candidates = dedupeByCommand(extractCandidates(result.structured) ?? [])
++  if (candidates.length === 0) {
+     throw new AicmdError('The model did not produce a command.')
+   }
+ 
+   return {
+-    candidates: deduped,
+-    costUsd,
+-    ...(model !== undefined ? { model } : {})
++    candidates,
++    costUsd: result.costUsd,
++    ...(result.model !== undefined ? { model: result.model } : {})
+   }
+ }
+ 
+diff --git a/src/prompts.ts b/src/prompts.ts
+index 0f663ff..d0af8f1 100644
+--- a/src/prompts.ts
++++ b/src/prompts.ts
+@@ -1,18 +1,14 @@
+ /**
+  * Prompt construction and response handling for command generation.
+  *
+- * The primary path is structured output against {@link COMMANDS_SCHEMA}, which
+- * makes parsing robust regardless of how the model formats prose. The plain
+- * text path exists only as a fallback for models that reject structured
+- * output; it loses the explanation and the model's danger flag (the local
+- * guard patterns still apply).
++ * Responses are structured output against {@link COMMANDS_SCHEMA}: a parsed
++ * object with one entry per candidate, so nothing depends on how the model
++ * formats prose, and every candidate carries the model's own danger
++ * assessment.
+  */
+ import { shellName } from './context.ts'
+ import type { GeneratedCommand } from './types.ts'
+ 
+-/** Sentinel separating candidate commands in the plain-text fallback. */
+-export const OPTION_DELIMITER = '===OPTION==='
+-
+ /**
+  * JSON schema for the structured response: a list of command candidates, each
+  * carrying its own explanation and danger self-assessment.
+@@ -100,7 +96,6 @@ export function extractCandidates(structured: unknown): GeneratedCommand[] | nul
+       command,
+       explanation: typeof record.explanation === 'string' ? record.explanation.trim() : '',
+       dangerous: record.dangerous === true,
+-      modelAssessed: true,
+       ...(typeof record.dangerReason === 'string' && record.dangerReason.trim() !== ''
+         ? { dangerReason: record.dangerReason.trim() }
+         : {})
+@@ -118,8 +113,6 @@ export interface SystemPromptOptions {
+   customPrompt: string | null
+   /** How many candidates will be requested (affects phrasing only). */
+   count: number
+-  /** Whether the response will be structured (JSON schema) or plain text. */
+-  structured: boolean
+ }
+ 
+ /** System prompt for command generation. */
+@@ -142,19 +135,12 @@ export function buildSystem(opts: SystemPromptOptions): string {
+     rules.push(`Target shell: ${shellName(opts.shellPath)}.`)
+   }
+ 
+-  if (opts.structured) {
+-    rules.push(
+-      'Assess every command for danger and fill "dangerous" and "dangerReason" as their field descriptions define.',
+-      'The "explanation" field is one concise sentence in plain language.',
+-      'Each "command" field must contain the raw command text only - no ' +
+-        'markdown, no code fences, no surrounding quotes.'
+-    )
+-  } else {
+-    rules.push(
+-      'Output ONLY the command itself on a single line: no markdown, no ' +
+-        'code fences, no quotes, no preamble, no explanation.'
+-    )
+-  }
++  rules.push(
++    'Assess every command for danger and fill "dangerous" and "dangerReason" as their field descriptions define.',
++    'The "explanation" field is one concise sentence in plain language.',
++    'Each "command" field must contain the raw command text only - no ' +
++      'markdown, no code fences, no surrounding quotes.'
++  )
+ 
+   if (opts.customPrompt !== null && opts.customPrompt.trim() !== '') {
+     rules.push(`Additional instructions from the user: ${opts.customPrompt}`)
+@@ -164,13 +150,11 @@ export function buildSystem(opts: SystemPromptOptions): string {
+ }
+ 
+ /** User prompt for command generation. */
+-export function buildUser(task: string, count: number, structured: boolean): string {
++export function buildUser(task: string, count: number): string {
+   const header = `Task:\n\n${task}`
+ 
+   if (count <= 1) {
+-    return structured
+-      ? `${header}\n\nProduce one command for this task and return it as the only element of the "commands" array.`
+-      : header
++    return `${header}\n\nProduce one command for this task and return it as the only element of the "commands" array.`
+   }
+ 
+   const distinct =
+@@ -178,64 +162,5 @@ export function buildUser(task: string, count: number, structured: boolean): str
+     `approaches or tools where sensible. Each option must independently ` +
+     `accomplish the whole task.`
+ 
+-  if (structured) {
+-    return `${header}\n\n${distinct} Return them in the "commands" array.`
+-  }
+-  return (
+-    `${header}\n\n${distinct} Output each option on its own line, preceded by ` +
+-    `a line containing exactly "${OPTION_DELIMITER}" and nothing else. ` +
+-    `Do not number the options or add any other text.`
+-  )
+-}
+-
+-/** Strip stray formatting a model may add despite instructions. */
+-export function cleanCommand(text: string): string {
+-  let cmd = text.trim()
+-
+-  // Prefer the contents of the first fenced code block, wherever it sits -
+-  // models sometimes wrap the command in prose ("Here's the command: ...").
+-  const fence = cmd.match(/```[^\n]*\n?([\s\S]*?)\n?```/)
+-  const fencedCommand = fence?.[1]
+-  if (fencedCommand !== undefined) cmd = fencedCommand.trim()
+-
+-  // A command is one line; keep the first non-empty one.
+-  cmd =
+-    cmd
+-      .split('\n')
+-      .map((line) => line.trim())
+-      .find((line) => line.length > 0) ?? ''
+-
+-  // Drop a copied-from-terminal prompt marker.
+-  if (cmd.startsWith('$ ')) cmd = cmd.slice(2).trim()
+-
+-  // Remove matching wrapping quotes/backticks only if the whole command is wrapped.
+-  if (cmd.length >= 2) {
+-    const first = cmd.at(0)
+-    const last = cmd.at(-1)
+-    if (first !== undefined && first === last && (first === '"' || first === "'" || first === '`')) {
+-      const inner = cmd.slice(1, -1)
+-      if (!inner.includes(first)) cmd = inner.trim()
+-    }
+-  }
+-
+-  return cmd
+-}
+-
+-/**
+- * Turn a plain-text response into candidates. Explanation and the model's
+- * danger flag are unavailable in this mode; the local guard patterns remain
+- * the safety net.
+- */
+-export function plainToCandidates(text: string, count: number): GeneratedCommand[] {
+-  const parts = count > 1 ? text.split(OPTION_DELIMITER) : [text]
+-  return parts
+-    .map(cleanCommand)
+-    .map((command) => normaliseCommand(command))
+-    .filter((command): command is string => command !== null)
+-    .map((command) => ({
+-      command,
+-      explanation: '',
+-      dangerous: false,
+-      modelAssessed: false
+-    }))
++  return `${header}\n\n${distinct} Return them in the "commands" array.`
+ }
+diff --git a/src/safety.ts b/src/safety.ts
+index c261e3c..1606f98 100644
+--- a/src/safety.ts
++++ b/src/safety.ts
+@@ -167,7 +167,6 @@ export function assessDanger(candidate: GeneratedCommand, patterns: string[]): D
+   }
+   return {
+     dangerous: reasons.length > 0,
+-    reasons,
+-    modelSignalAvailable: candidate.modelAssessed === true
++    reasons
+   }
+ }
+diff --git a/src/types.ts b/src/types.ts
+index 2773f31..44a3650 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -69,13 +69,6 @@ export interface GeneratedCommand {
+   dangerous: boolean
+   /** Why the model considers the command dangerous, when it does. */
+   dangerReason?: string
+-  /**
+-   * Whether {@link dangerous} is a real model assessment (structured output)
+-   * rather than a default. The plain-text fallback cannot carry the model's
+-   * verdict, and downstream safety routing must be able to tell the
+-   * difference - a defaulted `false` is not a clean bill of health.
+-   */
+-  modelAssessed?: boolean
+ }
+ 
+ /** The combined local + model danger verdict for one candidate. */
+@@ -83,12 +76,6 @@ export interface DangerAssessment {
+   dangerous: boolean
+   /** Human-readable reasons (guard-pattern hits and/or the model's reason). */
+   reasons: string[]
+-  /**
+-   * True when the model's own danger self-assessment backed this verdict.
+-   * When false, only the local guard patterns were applied, and `--execute`
+-   * refuses to run without `--force`.
+-   */
+-  modelSignalAvailable: boolean
+ }
+ 
+ /** Result of a single model invocation. */
+diff --git a/src/ui/interactive.ts b/src/ui/interactive.ts
+index 589edbc..feb5d67 100644
+--- a/src/ui/interactive.ts
++++ b/src/ui/interactive.ts
+@@ -103,15 +103,6 @@ export async function runInteractive(task: string, config: Config, opts: Interac
+     danger: assessDanger(candidate, patterns)
+   }))
+ 
+-  // A human confirms every run in this mode, but a degraded danger signal
+-  // (plain-text fallback: no model self-assessment) is still worth a note.
+-  if (entries.some((entry) => !entry.danger.modelSignalAvailable)) {
+-    printMuted(
+-      "Note: the model's danger self-assessment was unavailable " +
+-        '(plain-text fallback); only local guard patterns were applied.'
+-    )
+-  }
+-
+   const selection = await selectCommand(entries)
+ 
+   if (selection.action === 'cancel') {
+diff --git a/test/cli.test.ts b/test/cli.test.ts
+index 7c4b12b..2aee312 100644
+--- a/test/cli.test.ts
++++ b/test/cli.test.ts
+@@ -89,8 +89,7 @@ describe('decideAction', () => {
+   const base = {
+     mode: 'execute' as const,
+     force: false,
+-    dangerous: false,
+-    modelSignalAvailable: true
++    dangerous: false
+   }
+ 
+   test('execute refuses dangerous commands without force', () => {
+@@ -101,17 +100,10 @@ describe('decideAction', () => {
+     expect(decideAction({ ...base, dangerous: true, force: true })).toBe('run')
+   })
+ 
+-  test('execute runs safe, model-assessed commands', () => {
++  test('execute runs safe commands', () => {
+     expect(decideAction(base)).toBe('run')
+   })
+ 
+-  test("execute refuses when the model's danger signal was unavailable", () => {
+-    // The plain-text fallback loses the model's own assessment; auto-executing
+-    // on the pattern list alone would silently void the -x safety promise.
+-    expect(decideAction({ ...base, modelSignalAvailable: false })).toBe('refuse-unassessed')
+-    expect(decideAction({ ...base, modelSignalAvailable: false, force: true })).toBe('run')
+-  })
+-
+   test('dry-run and print always print, dangerous or not', () => {
+     expect(decideAction({ ...base, mode: 'dry-run', dangerous: true })).toBe('print')
+     expect(decideAction({ ...base, mode: 'print', dangerous: true })).toBe('print')
+diff --git a/test/generate.test.ts b/test/generate.test.ts
+index 7c7b7b2..6a49db8 100644
+--- a/test/generate.test.ts
++++ b/test/generate.test.ts
+@@ -3,7 +3,7 @@ import type { runPrompt } from '../src/agent.ts'
+ import { DEFAULT_CONFIG } from '../src/config.ts'
+ import { AicmdError } from '../src/errors.ts'
+ import { generateCommands } from '../src/generate.ts'
+-import { COMMANDS_SCHEMA, OPTION_DELIMITER } from '../src/prompts.ts'
++import { COMMANDS_SCHEMA } from '../src/prompts.ts'
+ import type { ModelResult } from '../src/types.ts'
+ import { itemAt } from './helpers.ts'
+ 
+@@ -63,22 +63,12 @@ describe('generateCommands', () => {
+     expect(itemAt(calls, 0).prompt).toContain('list files')
+   })
+ 
+-  test('falls back to plain text when structured attempts fail', async () => {
+-    const { runner, calls } = scriptedRunner([
+-      new Error('structured output unsupported'),
+-      { text: '```sh\nls -la\n```', costUsd: 0.02 }
+-    ])
+-    const result = await generateCommands('list files', config, {
+-      runner,
+-      shellPath: '/bin/sh'
+-    })
+-    expect(itemAt(result.candidates, 0).command).toBe('ls -la')
+-    // Fallback candidates carry no model danger assessment; downstream safety
+-    // routing must be able to see that.
+-    expect(itemAt(result.candidates, 0).modelAssessed).toBe(false)
+-    expect(calls).toHaveLength(2)
+-    expect(itemAt(calls, 0).opts.outputFormat).toBeDefined()
+-    expect(itemAt(calls, 1).opts.outputFormat).toBeUndefined()
++  test('a failed call surfaces as an error - there is no degraded fallback', async () => {
++    const { runner, calls } = scriptedRunner([new AicmdError('Model run failed: error_max_turns')])
++    await expect(generateCommands('list files', config, { runner, shellPath: '/bin/sh' })).rejects.toThrow(
++      'Model run failed: error_max_turns'
++    )
++    expect(calls).toHaveLength(1)
+   })
+ 
+   test('passes a verbose stderr sink through to the runner', async () => {
+@@ -92,17 +82,12 @@ describe('generateCommands', () => {
+     expect(itemAt(calls, 0).opts.onStderr).toBe(sink)
+   })
+ 
+-  test('a malformed structured payload falls through to the next attempt', async () => {
+-    const { runner, calls } = scriptedRunner([
+-      { text: '', costUsd: 0.01, structured: { nonsense: true } },
+-      { text: 'du -sh *', costUsd: 0.01 }
+-    ])
+-    const result = await generateCommands('disk usage', config, {
+-      runner,
+-      shellPath: '/bin/sh'
+-    })
+-    expect(itemAt(result.candidates, 0).command).toBe('du -sh *')
+-    expect(calls).toHaveLength(2)
++  test('a malformed structured payload is an error, not a retry', async () => {
++    const { runner, calls } = scriptedRunner([{ text: '', costUsd: 0.01, structured: { nonsense: true } }])
++    await expect(generateCommands('disk usage', config, { runner, shellPath: '/bin/sh' })).rejects.toThrow(
++      'The model did not produce a command.'
++    )
++    expect(calls).toHaveLength(1)
+   })
+ 
+   test('several candidates come from one structured call', async () => {
+@@ -119,19 +104,6 @@ describe('generateCommands', () => {
+     expect(itemAt(calls, 0).prompt).toContain('2 distinct command options')
+   })
+ 
+-  test('plain multi-candidate fallback splits on the delimiter', async () => {
+-    const { runner } = scriptedRunner([
+-      new Error('no structured'),
+-      { text: `ls\n${OPTION_DELIMITER}\ndu -sh *`, costUsd: 0 }
+-    ])
+-    const result = await generateCommands('list', config, {
+-      runner,
+-      count: 2,
+-      shellPath: '/bin/sh'
+-    })
+-    expect(result.candidates.map((c) => c.command)).toEqual(['ls', 'du -sh *'])
+-  })
+-
+   test('dedupes identical commands', async () => {
+     const { runner } = scriptedRunner([structuredResult([candidate, { ...candidate, explanation: 'again' }])])
+     const result = await generateCommands('list files', config, {
+@@ -142,48 +114,16 @@ describe('generateCommands', () => {
+     expect(result.candidates).toHaveLength(1)
+   })
+ 
+-  test('sums cost across attempts', async () => {
+-    const { runner } = scriptedRunner([
+-      { text: '', costUsd: 0.02, structured: { nope: 1 } },
+-      { text: 'ls', costUsd: 0.03 }
+-    ])
+-    const result = await generateCommands('list', config, {
+-      runner,
+-      shellPath: '/bin/sh'
+-    })
+-    expect(result.costUsd).toBeCloseTo(0.05)
+-  })
+-
+-  test('throws an AicmdError when every attempt fails', async () => {
+-    const { runner } = scriptedRunner([new AicmdError('model exploded'), new AicmdError('model exploded again')])
+-    await expect(generateCommands('list', config, { runner, shellPath: '/bin/sh' })).rejects.toThrow(
+-      'model exploded again'
+-    )
+-  })
+-
+   test('throws an AicmdError when the model produces nothing usable', async () => {
+-    const { runner } = scriptedRunner([
+-      { text: '', costUsd: 0, structured: { commands: [] } },
+-      { text: '   ', costUsd: 0 }
+-    ])
++    const { runner } = scriptedRunner([{ text: '', costUsd: 0, structured: { commands: [] } }])
+     await expect(generateCommands('list', config, { runner, shellPath: '/bin/sh' })).rejects.toThrow(AicmdError)
+   })
+ 
+-  test('stops retrying once the run is aborted', async () => {
++  test('passes the abort controller through to the runner', async () => {
+     const abortController = new AbortController()
+-    const { runner, calls } = scriptedRunner([new Error('aborted'), structuredResult([candidate])])
+-    const wrappedRunner: Runner = async (prompt, opts) => {
+-      abortController.abort()
+-      return runner(prompt, opts)
+-    }
+-    await expect(
+-      generateCommands('list', config, {
+-        runner: wrappedRunner,
+-        abortController,
+-        shellPath: '/bin/sh'
+-      })
+-    ).rejects.toThrow()
+-    expect(calls).toHaveLength(1)
++    const { runner, calls } = scriptedRunner([structuredResult([candidate])])
++    await generateCommands('list', config, { runner, abortController, shellPath: '/bin/sh' })
++    expect(itemAt(calls, 0).opts.abortController).toBe(abortController)
+   })
+ 
+   test('passes allowApiKey through to the runner', async () => {
+diff --git a/test/interactive.test.ts b/test/interactive.test.ts
+index 4a8d14e..ef3df26 100644
+--- a/test/interactive.test.ts
++++ b/test/interactive.test.ts
+@@ -3,8 +3,8 @@ import { type PickerEntry, pickerEntryLabel, renderPickerFrame, selectCommand }
+ import { fakeTerminal, KEY, press } from './terminal.ts'
+ 
+ const entry = (command: string, explanation: string, dangerous = false, reasons: string[] = []): PickerEntry => ({
+-  candidate: { command, explanation, dangerous, modelAssessed: true },
+-  danger: { dangerous, reasons, modelSignalAvailable: true }
++  candidate: { command, explanation, dangerous },
++  danger: { dangerous, reasons }
+ })
+ 
+ const entries: PickerEntry[] = [
+diff --git a/test/prompts.test.ts b/test/prompts.test.ts
+index 20116ce..7ea2f52 100644
+--- a/test/prompts.test.ts
++++ b/test/prompts.test.ts
+@@ -1,22 +1,12 @@
+ import { describe, expect, test } from 'vitest'
+-import {
+-  buildSystem,
+-  buildUser,
+-  COMMANDS_SCHEMA,
+-  cleanCommand,
+-  extractCandidates,
+-  normaliseCommand,
+-  OPTION_DELIMITER,
+-  plainToCandidates
+-} from '../src/prompts.ts'
++import { buildSystem, buildUser, COMMANDS_SCHEMA, extractCandidates, normaliseCommand } from '../src/prompts.ts'
+ import { itemAt } from './helpers.ts'
+ 
+ const baseSystemOpts = {
+   shellPath: '/bin/zsh',
+   contextBlock: 'Platform: macOS.' as string | null,
+   customPrompt: null as string | null,
+-  count: 1,
+-  structured: true
++  count: 1
+ }
+ 
+ describe('buildSystem', () => {
+@@ -54,9 +44,8 @@ describe('buildSystem', () => {
+     expect(system).toContain('Prefer eza over ls.')
+   })
+ 
+-  test('plain mode forbids markdown; structured mode scopes rules to fields', () => {
+-    const plain = buildSystem({ ...baseSystemOpts, structured: false })
+-    expect(plain).toMatch(/no (markdown|code fences|explanation)/i)
++  test('keeps markdown, code fences and quotes out of the command field', () => {
++    expect(buildSystem(baseSystemOpts)).toMatch(/no markdown, no code fences, no surrounding quotes/)
+   })
+ 
+   test('still names the target shell when context is disabled', () => {
+@@ -67,20 +56,15 @@ describe('buildSystem', () => {
+ 
+ describe('buildUser', () => {
+   test('single candidate asks for one command', () => {
+-    const user = buildUser('list the five largest files', 1, true)
++    const user = buildUser('list the five largest files', 1)
+     expect(user).toContain('list the five largest files')
+   })
+ 
+   test('multiple candidates ask for distinct options', () => {
+-    const user = buildUser('compress this directory', 3, true)
++    const user = buildUser('compress this directory', 3)
+     expect(user).toContain('3')
+     expect(user).toMatch(/distinct|different/i)
+   })
+-
+-  test('plain multi-candidate mode names the delimiter', () => {
+-    const user = buildUser('compress this directory', 3, false)
+-    expect(user).toContain(OPTION_DELIMITER)
+-  })
+ })
+ 
+ describe('COMMANDS_SCHEMA and extractCandidates', () => {
+@@ -139,13 +123,6 @@ describe('COMMANDS_SCHEMA and extractCandidates', () => {
+     expect(itemAt(out, 0).command).toBe('ls -la')
+   })
+ 
+-  test('marks structured candidates as model-assessed', () => {
+-    const out = extractCandidates({
+-      commands: [{ command: 'ls', explanation: 'lists', dangerous: false }]
+-    })
+-    expect(itemAt(out, 0).modelAssessed).toBe(true)
+-  })
+-
+   test('rejects commands smuggling control characters', () => {
+     // A carriage return lets the rendered confirmation differ from what
+     // executes (the terminal overwrites the line), so such candidates are
+@@ -190,64 +167,3 @@ describe('normaliseCommand', () => {
+     expect(normaliseCommand('')).toBeNull()
+   })
+ })
+-
+-describe('cleanCommand', () => {
+-  test('strips a wrapping code fence', () => {
+-    expect(cleanCommand('```sh\nls -la\n```')).toBe('ls -la')
+-    expect(cleanCommand('```\nls -la\n```')).toBe('ls -la')
+-  })
+-
+-  test('extracts a fenced block even when prose surrounds it', () => {
+-    expect(cleanCommand("Here's the command:\n```sh\nls -la\n```")).toBe('ls -la')
+-    expect(cleanCommand('Use this:\n\n```\ndu -sh *\n```\n\nThat should work.')).toBe('du -sh *')
+-  })
+-
+-  test('takes the first non-empty line of a multi-line response', () => {
+-    expect(cleanCommand('\n\nls -la\necho done')).toBe('ls -la')
+-  })
+-
+-  test('strips a leading shell prompt marker', () => {
+-    expect(cleanCommand('$ ls -la')).toBe('ls -la')
+-  })
+-
+-  test('strips matching wrapping quotes and backticks', () => {
+-    expect(cleanCommand('"ls -la"')).toBe('ls -la')
+-    expect(cleanCommand('`ls -la`')).toBe('ls -la')
+-    expect(cleanCommand("'ls -la'")).toBe('ls -la')
+-  })
+-
+-  test('keeps interior quotes intact', () => {
+-    expect(cleanCommand("grep 'foo bar' file.txt")).toBe("grep 'foo bar' file.txt")
+-  })
+-
+-  test('empty input stays empty', () => {
+-    expect(cleanCommand('')).toBe('')
+-    expect(cleanCommand('```\n```')).toBe('')
+-  })
+-})
+-
+-describe('plainToCandidates', () => {
+-  test('a single plain response becomes one candidate with unknown danger', () => {
+-    const out = plainToCandidates('ls -la', 1)
+-    expect(out).toHaveLength(1)
+-    expect(itemAt(out, 0).command).toBe('ls -la')
+-    expect(itemAt(out, 0).dangerous).toBe(false)
+-    expect(itemAt(out, 0).explanation).toBe('')
+-    expect(itemAt(out, 0).modelAssessed).toBe(false)
+-  })
+-
+-  test('drops candidates that keep control characters after cleanup', () => {
+-    expect(plainToCandidates('ls\r-la', 1)).toHaveLength(0)
+-  })
+-
+-  test('splits multi-candidate responses on the delimiter', () => {
+-    const text = `ls -la\n${OPTION_DELIMITER}\nfind . -type f\n${OPTION_DELIMITER}\ndu -sh *`
+-    const out = plainToCandidates(text, 3)
+-    expect(out.map((c) => c.command)).toEqual(['ls -la', 'find . -type f', 'du -sh *'])
+-  })
+-
+-  test('drops empty segments', () => {
+-    const out = plainToCandidates(`ls\n${OPTION_DELIMITER}\n\n${OPTION_DELIMITER}\npwd`, 3)
+-    expect(out.map((c) => c.command)).toEqual(['ls', 'pwd'])
+-  })
+-})
+diff --git a/test/safety.test.ts b/test/safety.test.ts
+index b33b76f..e4af9c1 100644
+--- a/test/safety.test.ts
++++ b/test/safety.test.ts
+@@ -173,25 +173,6 @@ describe('assessDanger', () => {
+     expect(result.reasons[0]).toContain('*frobnicate*')
+   })
+ 
+-  test("reports whether the model's own assessment was available", () => {
+-    const assessed = assessDanger({ command: 'ls', explanation: '', dangerous: false, modelAssessed: true }, patterns)
+-    expect(assessed.modelSignalAvailable).toBe(true)
+-
+-    const unassessed = assessDanger(
+-      {
+-        command: 'ls',
+-        explanation: '',
+-        dangerous: false,
+-        modelAssessed: false
+-      },
+-      patterns
+-    )
+-    expect(unassessed.modelSignalAvailable).toBe(false)
+-
+-    const legacy = assessDanger(safeCandidate('ls'), patterns)
+-    expect(legacy.modelSignalAvailable).toBe(false)
+-  })
+-
+   test("the model's own flag makes the command dangerous with its reason", () => {
+     const result = assessDanger(
+       {
+-- 
+2.55.0
+

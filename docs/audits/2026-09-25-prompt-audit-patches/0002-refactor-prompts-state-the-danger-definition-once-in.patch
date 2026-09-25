@@ -1,0 +1,92 @@
+From a2980356bfa84539723e5f086bdb5ab0de362a24 Mon Sep 17 00:00:00 2001
+From: syn <syn@syn.as>
+Date: Fri, 25 Sep 2026 01:29:19 +0100
+Subject: [PATCH 2/5] =?UTF-8?q?=E2=99=BB=EF=B8=8F=20refactor(prompts):=20s?=
+ =?UTF-8?q?tate=20the=20danger=20definition=20once,=20in=20the=20schema?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The meaning of the "dangerous" flag was written twice - in the schema
+field description and in the structured system-prompt rule - and the two
+copies disagreed:
+
+  schema:  changes system state ... writes to devices ...
+  system:  changes system state or configuration ... writes to raw devices
+
+"writes to devices" literally covers every `2>/dev/null`, and Sonnet 5
+follows instructions literally, so the model had to reconcile two
+wordings on every call. The reconciled definition (the system prompt's
+more precise wording, matching the README's 'raw-device writes') now
+lives only in the field description, which is the contract of the
+boolean. The system prompt keeps the instruction to assess, and
+dangerReason's description absorbs the 'short, whenever dangerous' rule.
+
+Live before/after probe (claude-sonnet-5, 12 runs each): benign
+/dev/null redirections flagged 0/9 -> 0/9; raw-disk dd control flagged
+3/3 -> 3/3. No regression; the gain is one unambiguous definition.
+
+- test: pin that the definition lives in the schema, not the prompt
+---
+ src/prompts.ts       | 14 +++++---------
+ test/prompts.test.ts |  9 +++++++++
+ 2 files changed, 14 insertions(+), 9 deletions(-)
+
+diff --git a/src/prompts.ts b/src/prompts.ts
+index 80dbfb3..0f663ff 100644
+--- a/src/prompts.ts
++++ b/src/prompts.ts
+@@ -38,13 +38,13 @@ export const COMMANDS_SCHEMA: Record<string, unknown> = {
+             type: 'boolean',
+             description:
+               'True when the command deletes or overwrites data, changes ' +
+-              'system state, elevates privileges, writes to devices, kills ' +
+-              'processes, rewrites published history, or pipes remote ' +
+-              'content into a shell.'
++              'system state or configuration, elevates privileges, writes to ' +
++              'raw devices, kills processes, rewrites published history, or ' +
++              'pipes remote content into a shell.'
+           },
+           dangerReason: {
+             type: 'string',
+-            description: 'Why the command is dangerous (when it is).'
++            description: 'A short reason the command is dangerous; give one whenever "dangerous" is true.'
+           }
+         },
+         required: ['command', 'explanation', 'dangerous'],
+@@ -144,11 +144,7 @@ export function buildSystem(opts: SystemPromptOptions): string {
+ 
+   if (opts.structured) {
+     rules.push(
+-      'Assess whether the command is dangerous: anything that deletes or ' +
+-        'overwrites data, changes system state or configuration, elevates ' +
+-        'privileges, writes to raw devices, kills processes, rewrites ' +
+-        'published history, or pipes remote content into a shell. Set the "dangerous" ' +
+-        'field accordingly and give a short "dangerReason" when it is true.',
++      'Assess every command for danger and fill "dangerous" and "dangerReason" as their field descriptions define.',
+       'The "explanation" field is one concise sentence in plain language.',
+       'Each "command" field must contain the raw command text only - no ' +
+         'markdown, no code fences, no surrounding quotes.'
+diff --git a/test/prompts.test.ts b/test/prompts.test.ts
+index 9c4ead9..20116ce 100644
+--- a/test/prompts.test.ts
++++ b/test/prompts.test.ts
+@@ -37,6 +37,15 @@ describe('buildSystem', () => {
+     expect(system).toMatch(/danger/i)
+   })
+ 
++  test('leaves the danger definition to the schema, so the two cannot disagree', () => {
++    const system = buildSystem(baseSystemOpts)
++    const properties = COMMANDS_SCHEMA.properties as Record<string, Record<string, unknown>>
++    const items = properties.commands?.items as { properties: Record<string, { description: string }> }
++    const definition = items.properties.dangerous?.description ?? ''
++    expect(definition).toContain('raw devices')
++    expect(system).not.toContain('raw devices')
++  })
++
+   test('appends the custom prompt', () => {
+     const system = buildSystem({
+       ...baseSystemOpts,
+-- 
+2.55.0
+

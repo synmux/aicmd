@@ -1,0 +1,44 @@
+From 8fe2f5d6b1a13364ca1e4dca20ba8e3d78f2fba3 Mon Sep 17 00:00:00 2001
+From: syn <syn@syn.as>
+Date: Fri, 25 Sep 2026 01:39:35 +0100
+Subject: [PATCH 5/5] =?UTF-8?q?=F0=9F=94=A7=20chore(format):=20keep=20pret?=
+ =?UTF-8?q?tier=20off=20the=20files=20biome=20owns?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+AGENTS.md tells agents to run 'pnpm run format' (prettier --write .).
+Trunk scopes prettier away from **/*.ts, **/*.js and **/*.json - biome
+owns those (single quotes, no semicolons) - and away from .agents/ and
+.serena/, but nothing told prettier itself. Run as documented at
+09a482c, the script rewrote 39 files (+4727/-4241) into prettier style,
+after which 'biome check' failed with 37 errors: an agent obeying the
+rule file broke the lint gate.
+
+A .prettierignore mirroring trunk's scoping (plus the generated
+lockfile) makes the documented command a safe no-op on a clean tree:
+zero files differ, and biome stays green.
+---
+ .prettierignore | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+ create mode 100644 .prettierignore
+
+diff --git a/.prettierignore b/.prettierignore
+new file mode 100644
+index 0000000..c0da961
+--- /dev/null
++++ b/.prettierignore
+@@ -0,0 +1,10 @@
++# Mirror trunk's scoping (.trunk/trunk.yaml): biome formats TypeScript,
++# JavaScript and JSON (see biome.json), so prettier must leave them alone.
++**/*.ts
++**/*.js
++**/*.json
++
++# Agent context trunk excludes from every linter, and the generated lockfile.
++.agents/
++.serena/
++pnpm-lock.yaml
+-- 
+2.55.0
+
